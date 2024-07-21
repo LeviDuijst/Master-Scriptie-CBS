@@ -1,0 +1,5484 @@
+---
+title: "Project 2"
+author: "Levi Duijst"
+date: "2024-05-06"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Packages
+First, loading in the packages. 
+```{r, warning=F}
+library(readr)
+library(readxl)
+library(reshape2)
+library("writexl")
+library(R2jags)
+library(dplyr)
+library(caret)
+library(car)
+library(ggplot2)
+library(MASS)
+```
+
+This R markdown file belongs to research Part 2. In this code, I check the model performance of the logistics regression model that belongs to the presence-absence data. I run the model twice for each species: one with the original dataset, and the other with the updated dataset. 
+
+In this code, two processes are run with different JAGS models. First, for each species, the total dataset is used to run the logistic regression model of the presence-absence dataset to obtain the parameters values that are used to calculate the population trend. The second part is doing cross-validation (CV) with both original and updated datasets for each species. A separate JAGS code is used for CV to test the model performance with the help of a train and test set.
+
+
+# JAGS code 
+## Original model
+Below is the JAGS code for running the logistic regression model as it done at Statistics Netherlands. This is the orinigal code and no changes are made. You must change it to a txt file, because that is how the JAGS model can read this code. 
+```{r}
+trend <- paste("Trend") 
+    sink(trend)
+  
+    cat("
+  
+    model {  
+  
+  # State model priors
+    for (t in 1:nyear) {
+      a[t] ~ dunif(-10, 10)   
+    }                 
+  
+  # State model priors
+    b1 ~ dunif(b1prior_min, b1prior_max) 
+    b2 ~ dunif(b2prior_min, b2prior_max)
+  
+    for (i in 1:nsite) {
+      eta[i] ~ dnorm(0, tau)       # extra random site-effect op occ
+    } 
+  
+    tau <- 1 / (sigma * sigma)
+    sigma ~ dunif(0, 5)
+  
+  # State model
+    for (i in 1:nsite) { 
+      for (t in 1:nyear) {   
+        M[i, t] ~ dbern(y[i, t])       # DATA
+        logit(y[i, t]) <- a[t] + (b1 * COVAR1[i, t]) / (b2 + COVAR1[i, t]) + eta[i] # Michaelis-Menten (Oude Voshaar p. 143; zero when species no. = mean) en eta is random site effect 
+      } 
+    } 
+    
+  
+  # Derived parameters
+    for (i in 1:nsite) { 
+      for (t in 1:nyear) {   
+        som[i, t] <- a[t] + eta[i]
+        yy[i, t]  <- exp(som[i, t]) / (1 + exp(som[i, t]))  # logit terugtransformatie; deze is identiek aan y als soortenrijkdom == NA 	
+         z[i, t]  ~ dbern(yy[i, t])	# NB gemiddelde z over sims vrijwel gelijk aan yy, maar CI groter dan die van yy  
+      }
+    }  
+  
+  # Trend 
+    for (t in 1:nyear) {  # eigenlijk is het geen echte psi.fs, maar voor automatisering gemakkelijk om die naam aan te houden
+      psi.fs[t] <- sum(z[1:nsite, t]) / nsite # en omgezet in 0 en 1 
+    } 
+   
+  # Overall trend in occupancy 
+    sumYpsi <- sum(psi.fs[4:nyear]) # Hier heb ik het veranderd naar 4 ipv 1 jaar
+    for (t in 1:nyear) {
+      sumxypsi[t] <- psi.fs[t] * t
+    }
+    sumXYpsi <- sum(sumxypsi[4:nyear]) # Deze had ik eerst veranderd
+    regres.psi <- (sumXYpsi - ((sumX * sumYpsi) / 3)) / (sumX2 - ((sumX * sumX) / 3)) #Hier heb ik de nyear naar 3 veranderd
+  
+    } # end of model formulation
+  					
+    ", fill=TRUE)
+  
+    sink()
+```
+
+
+## JAGS code adjusted for CV
+This JAGS code is adjusted to handle cross-validation. The biggest change is that the Prediction section is added to the code. JAGS can easily be used to also predict at the same time while running the model. In this case, the model runs and predicts values for the test data that is left out of the training data. The model will be stored in your current directory. You must change it to a txt file, because that is how the JAGS model can read this code. 
+```{r}
+modelcode_CV <- paste("CV") 
+    sink(modelcode_CV)
+  
+    cat("
+  
+    model {  
+  
+  # State model priors
+    for (t in 1:nyear) {
+      a[t] ~ dunif(-10, 10)   
+    }                 
+  
+  # State model priors
+    b1 ~ dunif(b1prior_min, b1prior_max) 
+    b2 ~ dunif(b2prior_min, b2prior_max)
+  
+    for (i in 1:nsite) {
+      eta[i] ~ dnorm(0, tau)       # extra random site-effect op occ
+    } 
+  
+    tau <- 1 / (sigma * sigma)
+    sigma ~ dunif(0, 5)
+  
+  # State model
+    for (i in 1:nsite) { 
+      for (t in 1:nyear) {   
+        M[i, t] ~ dbern(y[i, t])       # DATA
+        logit(y[i, t]) <- a[t] + (b1 * COVAR1[i, t]) / (b2 + COVAR1[i, t]) + eta[i] # Michaelis-Menten (Oude Voshaar p. 143; zero when species no. = mean) en eta is random site effect 
+      } 
+    } 
+    
+  # Prediction
+  for (k in 1:nsite2) {
+    for (t in 1:nyear) { 
+      M_pred[k, t] ~ dbern(y_pred[k, t]) 
+      logit(y_pred[k, t]) <- a[t] + (b1 * COVAR2[k, t]) / (b2 + COVAR2[k, t]) + eta[k]
+    }
+  }  
+  
+  # Derived parameters
+    for (i in 1:nsite) { 
+      for (t in 1:nyear) {   
+        som[i, t] <- a[t] + eta[i]
+        yy[i, t]  <- exp(som[i, t]) / (1 + exp(som[i, t]))  # logit terugtransformatie; deze is identiek aan y als soortenrijkdom == NA 	
+        z[i, t]  ~ dbern(yy[i, t])	# NB gemiddelde z over sims vrijwel gelijk aan yy, maar CI groter dan die van yy  
+      }
+    }  
+  
+  # Trend 
+    for (t in 1:nyear) {  # eigenlijk is het geen echte psi.fs, maar voor automatisering gemakkelijk om die naam aan te houden
+      psi.fs[t] <- sum(z[1:nsite, t]) / nsite # en omgezet in 0 en 1 
+    } 
+   
+  # Overall trend in occupancy 
+    sumYpsi <- sum(psi.fs[1:nyear])
+    for (t in 1:nyear) {
+      sumxypsi[t] <- psi.fs[t] * t
+    }
+    sumXYpsi <- sum(sumxypsi[1:nyear])
+    regres.psi <- (sumXYpsi - ((sumX * sumYpsi) / nyear)) / (sumX2 - ((sumX * sumX) / nyear))
+  
+    } # end of model formulation
+  					
+    ", fill=TRUE)
+  
+    sink()
+```
+
+
+For 19 species the same steps and code are applied. Therefore, I will only explain for one species all the steps and in which order the code should run to obtain the correct results. I will explain the code in detail for the species Kleine Veenbes. 
+
+# Kleine Veenbes 
+We start by reading in the datasets. There are two datasets with presence-absence data. The pre indicates the dataset before updating, so the original data. The post indicates the updated data. Both datasets have their own section indicated with pre and post. 
+Important to mention is that the code must be run in the exact order how the code chunks are presented. If you deviate from the order, then it can be that the code will not run or that a wrong dataset is used. 
+```{r}
+FLO_KleineVeenbes_pre <- read_excel("Kleine_veenbes_FLO_pre.xlsx")
+FLO_KleineVeenbes_post <- read_excel("Kleine_veenbes_FLO_post.xlsx")
+```
+
+## pre
+In this section, the original dataset is analysed with the JAGS code of the logistic regression. All these steps are the same as the ones used at Statistics Netherlands. For the logistic regression model, two data sources are needed. The binary outcome of presence-absence in M and the number of species found in a quadrant in COVAR1. The number of species are standardized too. 
+```{r}
+M = dcast(FLO_KleineVeenbes_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_KleineVeenbes_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+In the chunk below, some additional variables are defined and all relevant data are combined together in one variable. Also, initial values are added. 
+```{r}
+sumX = 4+5+6 #Some value has to written to this variable, but does not play a role in the analysis
+sumX2 = 16+25+36 #Some value has to written to this variable, but does not play a role in the analysis
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs") 
+```
+
+Now the model can run with the data, the initial values, the parameters to save, the JAGS code, the number of chains, the number of iterations and the number of burnings. Do note, you need to press the run button multiple times if the model is not running after the first try. 
+```{r}
+KleinVeenBes_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+The final step is to check if the model has convergence by looking at the Rhat values if they are below 1.1
+If that is not the case, the model is run again with more iterations. If the model has been convergence, then the model outcome is stored as sims and a new csv file is created. With the sims, the population trend can be calculated with the code of Trend_berekenen_classificeren_logitols.R. 
+```{r}
+KleinVeenBes_pre$BUGSoutput$summar
+x = t((KleinVeenBes_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="KleinVeenBes_pre_sims.csv",sep=";")
+```
+
+### CV
+In this section, the cross-validation is run. The CV exists of three steps. 
+Step 1: dividing the data into 5 folds. 
+The code below shows how the dataset is split into 5 folds. The number of rows (read number of quadrants/locations) are split over 5 folds equal as possible. The quadrants are randomly distributed over the 5 folds. 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+i=1
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+
+Step 2: running the 5-fold CV.
+Before running the model, some fixed parameters are defined. 
+I used a while loop to run the CV. The reason is that the model can sometimes be stuck and not run after the first try. Using this while loop, the code will try over and over till the model runs. The while loop stops after the fifth round. The predicted values for each fold are stored in a new dataframe called DF. This new DF keeps track of which fold the predicted data is from, for which Time (period) it belongs and the predicted probability. 
+In the while loop, I work with two version of niste and COVAR to alternate between the different folds. 
+```{r}
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6 #Some value has to written to this variable, but does not play a role in the analysis
+sumX2 = 1+4+9+16+25+36 #Some value has to written to this variable, but does not play a role in the analysis
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred") #Parameters of interest. M_pred is added compared to the original dataset above
+
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1]) #number of sites for the training set
+  nsite2 = length(M[L[[i]],1]) #number of sites for the test set
+  COVAR1 = COVAR[-L[[i]],] #number of species for the training set
+  COVAR2 = COVAR[L[[i]],] #number of species for the test set
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+
+```
+
+In the third step we analyse the results from the CV. I calculated the Brier score and the accuracy of the model. 
+I calculate both criteria with their formula's for each fold and then take the average over all five folds to finalize the cross-validation. 
+
+```{r}
+DF = na.omit(DF) #Remove all NAs, because not every locations was visited for each period.
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier) #Brier score
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC) #Accuracy of the model
+```
+
+
+## post
+For the updated data, the exact same steps are used as before. The only difference is the dataset. 
+
+```{r}
+M = dcast(FLO_KleineVeenbes_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_KleineVeenbes_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6 #Some value has to written to this variable, but does not play a role in the analysis
+sumX2 = 16+25+36 #Some value has to written to this variable, but does not play a role in the analysis
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs") 
+```
+
+
+```{r}
+KleinVeenBes_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+KleinVeenBes_post$BUGSoutput$summary
+x = t((KleinVeenBes_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="KleinVeenBes_post_sims.csv",sep=";")
+```
+
+### CV
+
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+
+```{r}
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6 #Some value has to written to this variable, but does not play a role in the analysis
+sumX2 = 1+4+9+16+25+36 #Some value has to written to this variable, but does not play a role in the analysis
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+# Armbloemige waterbies
+```{r}
+FLO_Armbloemige_waterbies_pre <- read_excel("Armbloemige_waterbies_FLO_pre.xlsx")
+FLO_Armbloemige_waterbies_post <- read_excel("Armbloemige_waterbies_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Armbloemige_waterbies_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Armbloemige_waterbies_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+M_cv = M
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <-  c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Armbloemige_waterbies_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Armbloemige_waterbies_pre$BUGSoutput$summary
+x = t((Armbloemige_waterbies_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Armbloemige_waterbies_pre_sims.csv",sep=";")
+```
+
+
+### CV
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+
+```{r}
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+
+
+## post
+```{r}
+M = dcast(FLO_Armbloemige_waterbies_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Armbloemige_waterbies_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <-  c("a","regres.psi", "psi.fs") 
+```
+
+
+```{r}
+Armbloemige_waterbies_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Armbloemige_waterbies_post$BUGSoutput$summary
+x = t((Armbloemige_waterbies_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Armbloemige_waterbies_post_sims.csv",sep=";")
+```
+
+
+### CV
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+
+```{r}
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+
+# Ruig Viooltje
+```{r}
+FLO_Ruig_viooltje_pre <- read_excel("Ruig_viooltje_FLO_pre.xlsx")
+FLO_Ruig_viooltje_post <- read_excel("Ruig_viooltje_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Ruig_viooltje_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Ruig_viooltje_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Ruig_viooltje_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Ruig_viooltje_pre$BUGSoutput$summary
+x = t((Ruig_viooltje_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Ruig_viooltje_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1] 
+}
+mean(AC)
+```
+
+
+## post 
+```{r}
+M = dcast(FLO_Ruig_viooltje_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Ruig_viooltje_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Ruig_viooltje_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Ruig_viooltje_post$BUGSoutput$summary
+x = t((Ruig_viooltje_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Ruig_viooltje_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]    
+}
+mean(AC)
+```
+
+
+
+# Draadzegge
+```{r}
+FLO_Draadzegge_pre <- read_excel("Draadzegge_FLO_pre.xlsx")
+FLO_Draadzegge_post <- read_excel("Draadzegge_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Draadzegge_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Draadzegge_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Draadzegge_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Draadzegge_pre$BUGSoutput$summary
+x = t((Draadzegge_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Draadzegge_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Draadzegge_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Draadzegge_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Draadzegge_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Draadzegge_post$BUGSoutput$summary
+x = t((Draadzegge_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Draadzegge_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+
+# Knikkende distel
+```{r}
+FLO_Knikkende_distel_pre <- read_excel("Knikkende_distel_FLO_pre.xlsx")
+FLO_Knikkende_distel_post <- read_excel("Knikkende_distel_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Knikkende_distel_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Knikkende_distel_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Knikkende_distele_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Knikkende_distele_pre$BUGSoutput$summary
+x = t((Knikkende_distele_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Knikkende_distele_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post 
+```{r}
+M = dcast(FLO_Knikkende_distel_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Knikkende_distel_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Knikkende_distel_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Knikkende_distel_post$BUGSoutput$summary
+x = t((Knikkende_distel_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Knikkende_distel_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+
+# Parnassia
+```{r}
+FLO_Parnassia_pre <- read_excel("Parnassia_FLO_pre.xlsx")
+FLO_Parnassia_post <- read_excel("Parnassia_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Parnassia_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Parnassia_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Parnassia_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Parnassia_pre$BUGSoutput$summary  
+x = t((Parnassia_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Parnassia_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post 
+```{r}
+M = dcast(FLO_Parnassia_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Parnassia_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Parnassia_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Parnassia_post$BUGSoutput$summary
+x = t((Parnassia_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Parnassia_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Grote keverorchis
+```{r}
+FLO_Grote_keverorchis_pre <- read_excel("Grote_keverorchis_FLO_pre.xlsx")
+FLO_Grote_keverorchis_post <- read_excel("Grote_keverorchis_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Grote_keverorchis_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Grote_keverorchis_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Grote_keverorchis_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Grote_keverorchis_pre$BUGSoutput$summary 
+x = t((Grote_keverorchis_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Grote_keverorchis_pre_sims.csv",sep=";")
+```
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post 
+```{r}
+M = dcast(FLO_Grote_keverorchis_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Grote_keverorchis_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Grote_keverorchis_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 7000, n.burnin = 6000 ,jags.seed = 1234)
+```
+
+```{r}
+Grote_keverorchis_post$BUGSoutput$summary  
+x = t((Grote_keverorchis_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Grote_keverorchis_post_sims.csv",sep=";")
+```
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+
+# Kransmunt
+```{r}
+FLO_Kransmunts_pre <- read_excel("Kransmunt_FLO_pre.xlsx")
+FLO_Kransmunt_post <- read_excel("Kransmunt_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Kransmunts_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Kransmunts_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Kransmunt_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Kransmunt_pre$BUGSoutput$summary
+x = t((Kransmunt_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Kransmunt_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Kransmunt_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Kransmunt_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Kransmunt_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Kransmunt_post$BUGSoutput$summary
+x = t((Kransmunt_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Kransmunt_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Zwarte populier
+```{r}
+FLO_Zwarte_populier_pre <- read_excel("Zwarte_populier_FLO_pre.xlsx")
+FLO_Zwarte_populier_post <- read_excel("Zwarte_populier_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Zwarte_populier_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Zwarte_populier_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Zwarte_populier_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Zwarte_populier_pre$BUGSoutput$summary
+x = t((Zwarte_populier_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Zwarte_populier_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Zwarte_populier_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Zwarte_populier_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Zwarte_populier_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Zwarte_populier_post$BUGSoutput$summary
+x = t((Zwarte_populier_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Zwarte_populier_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Kleine leeuwentand
+```{r}
+FLO_Kleine_leeuwentand_pre <- read_excel("Kleine_leeuwentand_FLO_pre.xlsx")
+FLO_Kleine_leeuwentand_post <- read_excel("Kleine_leeuwentand_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Kleine_leeuwentand_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Kleine_leeuwentand_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Kleine_leeuwentand_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Kleine_leeuwentand_pre$BUGSoutput$summary
+x = t((Kleine_leeuwentand_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Kleine_leeuwentand_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Kleine_leeuwentand_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Kleine_leeuwentand_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Kleine_leeuwentand_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Kleine_leeuwentand_post$BUGSoutput$summary
+x = t((Kleine_leeuwentand_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Kleine_leeuwentand_post_sims.csv",sep=";")
+```
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+
+
+
+# Veenreukgras
+```{r}
+FLO_Veenreukgras_pre <- read_excel("Veenreukgras_FLO_pre.xlsx")
+FLO_Veenreukgras_post <- read_excel("Veenreukgras_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Veenreukgras_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Veenreukgras_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Veenreukgras_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Veenreukgras_pre$BUGSoutput$summary
+x = t((Veenreukgras_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Veenreukgras_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Veenreukgras_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Veenreukgras_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Veenreukgras_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Veenreukgras_post$BUGSoutput$summary
+x = t((Veenreukgras_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Veenreukgras_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+
+
+
+# Groot moerasscherm
+```{r}
+FLO_Groot_moerasscherm_pre <- read_excel("Groot_moerasscherm_FLO_pre.xlsx")
+FLO_Groot_moerasscherm_post <- read_excel("Groot_moerasscherm_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Groot_moerasscherm_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Groot_moerasscherm_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Groot_moerasscherm_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Groot_moerasscherm_pre$BUGSoutput$summary
+x = t((Groot_moerasscherm_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Groot_moerasscherm_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Groot_moerasscherm_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Groot_moerasscherm_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Groot_moerasscherm_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Groot_moerasscherm_post$BUGSoutput$summary
+x = t((Groot_moerasscherm_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Groot_moerasscherm_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Hengel
+```{r}
+FLO_Hengel_pre <- read_excel("Hengel_FLO_pre.xlsx")
+FLO_Hengel_post <- read_excel("Hengel_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Hengel_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Hengel_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Hengel_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Hengel_pre$BUGSoutput$summary
+x = t((Hengel_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Hengel_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Hengel_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Hengel_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Hengel_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Hengel_post$BUGSoutput$summary
+x = t((Hengel_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Hengel_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+
+
+
+# Snavelzegge
+```{r}
+FLO_Snavelzegge_pre <- read_excel("Snavelzegge_FLO_pre.xlsx")
+FLO_Snavelzegge_post <- read_excel("Snavelzegge_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Snavelzegge_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Snavelzegge_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Snavelzegge_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Snavelzegge_pre$BUGSoutput$summary
+x = t((Snavelzegge_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Snavelzegge_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Snavelzegge_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Snavelzegge_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Snavelzegge_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Snavelzegge_post$BUGSoutput$summary
+x = t((Snavelzegge_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Snavelzegge_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Drienerfmuur
+```{r}
+FLO_Drienerfmuur_pre <- read_excel("Drienerfmuur_FLO_pre.xlsx")
+FLO_Drienerfmuur_post <- read_excel("Drienerfmuur_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Drienerfmuur_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Drienerfmuur_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Drienerfmuur_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Drienerfmuur_pre$BUGSoutput$summary
+x = t((Drienerfmuur_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Drienerfmuur_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Drienerfmuur_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Drienerfmuur_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Drienerfmuur_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+Drienerfmuur_post$BUGSoutput$summary
+x = t((Drienerfmuur_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Drienerfmuur_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Bergbasterdwederik
+```{r}
+FLO_Bergbasterdwederik_pre <- read_excel("Bergbasterdwederik_FLO_pre.xlsx")
+FLO_Bergbasterdwederik_post <- read_excel("Bergbasterdwederik_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Bergbasterdwederik_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Bergbasterdwederik_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Bergbasterdwederik_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+Bergbasterdwederik_pre$BUGSoutput$summary
+x = t((Bergbasterdwederik_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Bergbasterdwederik_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Bergbasterdwederik_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Bergbasterdwederik_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Bergbasterdwederik_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Bergbasterdwederik_post$BUGSoutput$summary
+x = t((Bergbasterdwederik_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Bergbasterdwederik_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Bosandoorn
+```{r}
+FLO_Bosandoorn_pre <- read_excel("Bosandoorn_FLO_pre.xlsx")
+FLO_Bosandoorn_post <- read_excel("Bosandoorn_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Bosandoorn_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Bosandoorn_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Bosandoorn_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+Bosandoorn_pre$BUGSoutput$summary
+x = t((Bosandoorn_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Bosandoorn_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Bosandoorn_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Bosandoorn_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Bosandoorn_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Bosandoorn_post$BUGSoutput$summary
+x = t((Bosandoorn_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Bosandoorn_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Blauw glidkruid
+```{r}
+FLO_Blauw_glidkruid_pre <- read_excel("Blauw_glidkruid_FLO_pre.xlsx")
+FLO_Blauw_glidkruid_post <- read_excel("Blauw_glidkruid_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Blauw_glidkruid_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Blauw_glidkruid_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Blauw_glidkruid_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Blauw_glidkruid_pre$BUGSoutput$summary
+x = t((Blauw_glidkruid_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Blauw_glidkruid_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Blauw_glidkruid_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Blauw_glidkruid_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Blauw_glidkruid_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Blauw_glidkruid_post$BUGSoutput$summary
+x = t((Blauw_glidkruid_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Blauw_glidkruid_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Kraailook
+```{r}
+FLO_Kraailook_pre <- read_excel("Kraailook_FLO_pre.xlsx")
+FLO_Kraailook_post <- read_excel("Kraailook_FLO_post.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Kraailook_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Kraailook_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Kraailook_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Kraailook_pre$BUGSoutput$summary
+x = t((Kraailook_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Kraailook_pre_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]  
+}
+mean(AC)
+```
+
+## post
+```{r}
+M = dcast(FLO_Kraailook_post, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Kraailook_post, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Kraailook_post = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Kraailook_post$BUGSoutput$summary
+x = t((Kraailook_post$BUGSoutput$sims.matrix))
+write.table(x=x,file="Kraailook_post_sims.csv",sep=";")
+```
+
+
+### CV 
+```{r}
+set.seed(123)
+leng = length(M[,1])
+g = leng/5
+b = floor(g)
+r = round((g-b)/0.2)
+n = c(rep(b , (5-r)),rep(b+1,r))
+
+indx = sample(1:length(M[,1]))
+
+for(i in 1:5){
+  aantal = n[i]
+  waarde = indx[1:n[i]]
+  assign(paste("fold",i, sep = ""),waarde)
+  indx = indx[-c(1:n[i])]
+}
+
+L = list(fold1,fold2, fold3, fold4, fold5)
+
+```
+
+```{r}
+set.seed(123)
+DF = data.frame("Fold"= rep(1:5,c(n*6)), "Time" = rep(1:6, sum(n)),"Probability" = NA,"Real_value" = NA)
+sumX = 1+2+3+4+5+6
+sumX2 = 1+4+9+16+25+36
+nyear = 6
+i=1
+parameters <- c("a","regres.psi", "psi.fs","M_pred")
+while(i < 6 ){
+  nsite = length(M[-L[[i]],1])
+  nsite2 = length(M[L[[i]],1])
+  COVAR1 = COVAR[-L[[i]],]
+  COVAR2 = COVAR[L[[i]],]
+  M_cv = M[-L[[i]],]
+  data <- list("M"=M_cv, "nsite"=nsite, "nsite2"= nsite2, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "COVAR2" = COVAR2, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  zst <- M[-L[[i]],]
+  zst[is.na(zst)] <- 0
+  inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+  try({CV_5 = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "CV.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+  i = i+1
+  
+  for(j in 1:6){
+    hold = (apply((CV_5$BUGSoutput$sims.list$M_pred)[,,j],2,mean))
+    DF[DF$Fold == i-1 & DF$Time == j,]$Probability = hold
+    
+  }
+  DF[DF$Fold == i-1,]$Real_value = as.vector(t(M[L[[i-1]],]))
+})
+}
+
+```
+
+```{r}
+DF = na.omit(DF)
+brier = c()
+for(i in 1:5){
+  brier[i] = mean((DF[DF$Fold == i,]$Probability -  DF[DF$Fold == i,]$Real_value)^2)
+}
+mean(brier)
+
+AC = c()
+for(i in 1:5){
+  AC[i] = confusionMatrix(factor(round(DF[DF$Fold == i,]$Probability),levels = 0:1),factor(DF[DF$Fold == i,]$Real_value,levels = 0:1))$overall[1]   
+}
+mean(AC)
+```
+
+# Interlude 
+With the following four species, I only used the original dataset to obtain the parameter of interest to later calculate the population trend. No cross-validation or updated dataset were used for these next four species. 
+# Blauwe knoop
+```{r}
+FLO_Blauwe_knoop_pre <- read_excel("Blauwe_knoop_FLO_pre.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Blauwe_knoop_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Blauwe_knoop_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Blauwe_knoop_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Blauwe_knoop_pre$BUGSoutput$summary
+x = t((Blauwe_knoop_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Blauwe_knoop_FLO_pre_sims.csv",sep=";")
+```
+
+
+
+# Moeraskartelblad
+```{r}
+FLO_Moeraskartelblad_pre <- read_excel("Moeraskartelblad_FLO_pre.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Moeraskartelblad_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Moeraskartelblad_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Moeraskartelblad_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Moeraskartelblad_pre$BUGSoutput$summary
+x = t((Moeraskartelblad_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Moeraskartelblad_FLO_pre_sims.csv",sep=";")
+```
+
+
+
+
+
+
+# Goudzuring
+```{r}
+FLO_Goudzuring_pre <- read_excel("Goudzuring_FLO_pre.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Goudzuring_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Goudzuring_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Goudzuring_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Goudzuring_pre$BUGSoutput$summary
+x = t((Goudzuring_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Goudzuring_FLO_pre_sims.csv",sep=";")
+```
+# Knolboterbloem
+```{r}
+FLO_Knolboterbloem_pre <- read_excel("Knolboterbloem_FLO_pre.xlsx")
+```
+
+## pre
+```{r}
+M = dcast(FLO_Knolboterbloem_pre, Coordinaten ~ Jaar, value.var = "Aanwezig")
+COVAR1 = dcast(FLO_Knolboterbloem_pre, Coordinaten ~ Jaar, value.var = "Aantal")
+COVAR1 = COVAR1[,2:7]
+
+
+COVAR1 =  as.matrix(COVAR1)
+M = Standard = as.matrix(M[,2:7])
+
+mn1 <- mean(COVAR1, na.rm = TRUE)
+sd1 <- sqrt(var(COVAR1[1:length(COVAR1)], na.rm = TRUE))
+mn1_min <- min(COVAR1, na.rm = TRUE)
+mn1_max <- max(COVAR1, na.rm = TRUE)
+COVAR1 =  (COVAR1 - mn1) / sd1
+
+# Impute means for missing values
+COVAR1[is.na(COVAR1)] <- 0
+  
+# Avoid extreme values of standardized NSRT1 because it may cause difficulties in JAGS
+a <- COVAR1 > 5 
+COVAR1[a] <- 5 
+COVAR = COVAR1
+```
+
+
+```{r}
+sumX = 4+5+6
+sumX2 = 16+25+36
+nsite = length(M[,1])
+nyear = 6
+data <- list("M"=M, "nsite"=nsite, "nyear"=nyear, "sumX"=sumX, "sumX2"=sumX2, "COVAR1"=COVAR1, "b1prior_min"=-10, "b1prior_max" = 10, "b2prior_min" = -10, "b2prior_max"=10)
+  
+# (2) Starting values
+zst <- M
+zst[is.na(zst)] <- 0
+inits <- function() { list(a=rnorm(nyear,0,1), eta=rnorm(nsite,0,1),
+                             sigma=runif(1,0,5), b1=runif(1,0.5,5), b2=runif(1,0.5,5), z=zst) } 
+  
+# (3) Parameters to be monitored, add z if desired
+parameters <- c("a","regres.psi", "psi.fs")  
+```
+
+
+```{r}
+Knolboterbloem_pre = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Trend.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+```{r}
+Knolboterbloem_pre$BUGSoutput$summary
+x = t((Knolboterbloem_pre$BUGSoutput$sims.matrix))
+write.table(x=x,file="Knolboterbloem_FLO_pre_sims.csv",sep=";")
+```
+
+
+# Analysing the results of cross-validation 
+In this last section of Research Part 2, I analysed the results. The results included the change in Accuracy, Brier score and standard error of the population trend.
+
+Reading in the data
+```{r}
+Overview_Planten_FLORON <- read_excel("Data_Overview_Project2.xlsx")
+```
+
+Next, I created a new variable called proportioneel which is the amount of added data noted as percentage. 
+I also change negative values into very small positive values to visualize the results better.
+```{r}
+Overview_Planten_FLORON$proportioneel = Overview_Planten_FLORON$Aantal_erbij/Overview_Planten_FLORON$`Aantal FLORON na poolen` *100
+B = Overview_Planten_FLORON
+B[B$Percentage_increase <0,]$Percentage_increase = 0.0000001 
+B[B$SD_decrease<0,]$SD_decrease = 0.0000001
+```
+I changed negative Percentage_increase into zeroes, because the negative values were so low, that it did not had a big impact on the model performance. Making them into zeroes, makes it easier to model the data later on. 
+
+
+## Model making
+```{r}
+model1 = lm(Percentage_increase^(2/3) ~  trend * proportioneel, data = B[,])
+model2 =  lm(-(Brier_decrease)^(2/3) ~  trend * proportioneel, data = B[,])
+model3 = lm(-(SD_decrease) ~  trend * proportioneel, data = B[,])
+```
+
+
+Model 1 and 2 needed to be transformed to make the data normally distributed (the residuals) when looked at the boxcox plots. 
+```{r}
+boxcox(model1)
+boxcox(model2) #moving the minus sign in the model to run this code
+boxcox(model3) #moving the minus sign in the model to run this code
+```
+
+## Model assumptions
+To see if the data is more or less linear, I test two assumptions: the residual are normally distributed and follows a linear regression. 
+
+First we have a look at the linerity of the data.
+```{r}
+residualPlots(model1, id = TRUE)
+residualPlots(model2, id = TRUE)
+residualPlots(model3, id = TRUE)
+```
+
+All models shown good signs of linearity. 
+
+```{r}
+ncvTest(model1)
+ncvTest(model2)
+ncvTest(model3)
+```
+The variance is equal for all models.
+
+Next, we look if the residuals are normally distributed with a QQ plot. 
+```{r}
+qqPlot(model1$residuals)
+qqPlot(model2$residuals)
+qqPlot(model3$residuals)
+```
+
+```{r}
+shapiro.test(model1$residuals)
+shapiro.test(model2$residuals)
+shapiro.test(model3$residuals)
+```
+
+For all models, the residuals are normally distributed. 
+
+
+Finally, we have a look at the model summary for all three models.
+
+```{r}
+summary(model1)
+summary(model2)
+summary(model3)
+```
+
+
+## Visualization 
+The final step is to plot the data.
+
+### Accuracy
+```{r}
+ggplot(B[,], aes(proportioneel, Percentage_increase^(2/3), colour = trend)) + 
+  geom_point() + 
+  geom_smooth(method = 'lm', se = F) + 
+  labs(x = "Proportional increase in number of added data points from cover data") + 
+  labs(y = "Accuracy increase^(2/3) in percentage") +
+  labs(title = "Accuracy increase percentage after addition of data points ") +
+  labs(color = "Trend line") +
+  scale_color_manual(
+    values = c("red", "blue"),  # Replace with actual colors
+    labels = c("Uncertain", "Certain")   # Replace with your new labels
+  ) 
+```
+
+### Brier score
+```{r}
+ggplot(B[,], aes(proportioneel, -(Brier_decrease)^(2/3), colour = trend)) + 
+  geom_point() + 
+  geom_smooth(method = 'lm', se = F) +
+  labs(x = "Proportional increase in number of added data points from cover data") + 
+  labs(y = "Brier decrease^(2/3) in percentage ") +
+  labs(title = "Brier percentage decrease after of addition data points ") +
+  labs(color = "Trend line") +
+  scale_color_manual(
+    values = c("red", "blue"),  # Replace with actual colors
+    labels = c("Uncertain", "Certain")   # Replace with your new labels
+  ) 
+```
+
+### Standard error
+```{r}
+ggplot(B[,], aes(proportioneel, -SD_decrease, colour = trend)) + 
+  geom_point() + 
+  geom_smooth(method = 'lm', se = F) +
+  labs(x = "Proportional increase in number of added data points from cover data") +
+  labs(y = "SE decrease in percentage ") +
+  labs(title = "Standard error percentage decrease after of addition data points ") +
+  labs(color = "Trend line") +
+  scale_color_manual(
+    values = c("red", "blue"),  # Replace with actual colors
+    labels = c("Uncertain", "Certain")   # Replace with your new labels
+  ) 
+```
+
+
+
