@@ -1,0 +1,1529 @@
+---
+title: "Cover data analysis"
+output: pdf_document
+date: "2024-02-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Packages
+```{r}
+library(readxl)
+library("writexl")
+library(readr)
+library(reshape2)
+library(R2jags)
+```
+
+
+This code is needed to obtain the model results from the individual cover model for Research Part 3. 
+
+
+Model specification in JAGS language for the OZAB model. It is the same as the one used by Statistical Netherlands. No changes are implemented in this code. After this code chunk is run, the file appears in the working directory. This file must be converted to a txt to be implemented in the JAGS model. 
+```{r}
+modelcode <- paste("Cover") 
+    sink(modelcode) 
+    cat("
+  model {   
+
+  # Priors cover model
+  for (i in 1:nsite) {
+    a[i] ~ dnorm(0, tau.b)   # random site-effect
+  }      
+  tau.b <- 1 / (sigma.b * sigma.b)
+  sigma.b ~ dt(0, 1, 1)T(0,) # half cauchy, via afgeknotte t-verdeling; zie Gelman: http://www.stat.columbia.edu/~gelman/research/published/taumain.pdf
+
+  for (t in 1:nyear) {   
+    b[t]  ~ dnorm(0, .5) # weakly informative on probability scale
+  }
+
+  phi ~ dt(0, 1, 1)T(0,)
+
+  # Priors presence-absence model
+  for (i in 1:nsite) {
+    c[i] ~ dnorm(0, tau.p)       # random site-effect
+  } 
+  tau.p <- 1 / (sigma.p * sigma.p)
+  sigma.p ~ dt(0, 1, 1)T(0,)           
+
+  for (t in 1:nyear) {
+    d[t] ~ dnorm(0, .5)  
+  }                 
+
+  # cover model (conditional on presence)
+  for (i in 1:nsite) { 
+    for (t in 1:nyear) {   
+      M[i,t] ~ dinterval(y.cover[i,t],limits)      # data link; data contain only cover records >  0   # mooier is hier C van maken ipv M
+      y.cover[i,t] ~ dbeta(alpha[i,t], beta[i,t])T(.001, .999)  # beta distribution
+      alpha[i,t]     <- 1e-4 + phi * mu[i,t]       # extra trace value to avoid zero 
+      beta[i,t]      <- 1e-4 + phi * (1-mu[i,t])   # extra trace value to avoid zero
+      logit(mu[i,t]) <- a[i] + b[t]                # mu depends on site and period effects
+    } 
+  } 
+
+  # presence-absence model
+  for (i in 1:nsite) { 
+    for (t in 1:nyear){   
+       M1[i,t] ~ dbern(psi[i,t])                    # data link; all data degraded into 0 and 1 records # mooier is hier Z van maken ipv M1
+       logit(psi[i,t]) <- c[i] + d[t]               # psi depends on site and period effects
+    } 
+  } 
+
+#####################################################################
+# Derived parameters 
+# occurrence and cover per period
+
+# mean psi, i.e., mean probability of occurrence
+for (t in 1:nyear) {  
+  mean_psi[t] <- sum(psi[1:nsite,t])/nsite
+} 
+
+# mean conditional cover, i.e., cover conditional on presence
+for (t in 1:nyear) {  
+  mean_conditional_cover[t]  <- sum(mu[1:nsite,t])/nsite 
+} 
+
+# mean_unconditional_cover, i.e., the combination of mean_conditional_cover and mean_psi 
+for (t in 1:nyear) {
+  mean_unconditional_cover[t] <- mean_psi[t] * mean_conditional_cover[t]
+}
+
+#####################################################################
+# Derived parameters 
+# ordinary least squares (ols) on logit scale to assess trend  across all periods
+
+# ols using mean psi on logit scale to obtain trend in occurrence 
+for(t in 1:nyear){
+  mean_psi_logit[t] <- logit(mean_psi[t])
+}
+sum_mean_psi_logit <- sum(mean_psi_logit[4:nyear])
+for(t in 1:nyear){
+  mean_psi_logit_t[t] <- mean_psi_logit[t] * t
+}
+sum_mean_psi_logit_t <- sum(mean_psi_logit_t[4:nyear])
+regres_mean_psi_logit <- (sum_mean_psi_logit_t - ((sumX*sum_mean_psi_logit)/3))/(sumX2 - ((sumX*sumX)/3))
+
+####
+# ols using mean mu on logit to obtain regres.mean_mu_logit (= trend in conditional_cover)
+for (t in 1:nyear) {
+  mean_mu_logit[t] <- logit(mean_conditional_cover[t])
+}
+sum_mean_mu_logit <- sum(mean_mu_logit[4:nyear])
+for (t in 1:nyear) {
+  mean_mu_logit_t[t] <- mean_mu_logit[t] * t
+}
+sum_mean_mu_logit_t <- sum(mean_mu_logit_t[4:nyear])
+regres_mean_mu_logit <- (sum_mean_mu_logit_t - ((sumX*sum_mean_mu_logit)/3)) /(sumX2 - ((sumX*sumX)/3) )
+
+####
+# ols using logit of combination of mu and psi to obtain trend in mean_unconditional_cover
+for (t in 1:nyear) {
+  mean_unconditional_cover_logit[t] <- logit(mean_unconditional_cover[t])
+}
+sum_mean_unconditional_cover_logit <- sum(mean_unconditional_cover_logit[4:nyear])
+for (t in 1:nyear) {
+  mean_unconditional_cover_logit_t[t] <- mean_unconditional_cover_logit[t] * t
+}
+sum_mean_unconditional_cover_logit_t <- sum(mean_unconditional_cover_logit_t[4:nyear])
+regres_mean_unconditional_cover_logit <- (sum_mean_unconditional_cover_logit_t - ((sumX*sum_mean_unconditional_cover_logit)/3)) /(sumX2 - ((sumX*sumX)/3))
+
+} # end of model formulation
+
+  ",fill=TRUE)
+    
+    sink()
+```
+
+In this code, I run the OZAB model for twelve species. I will only explain the code for one species, because they all run the same, except that the data is different for each species.
+
+# Ruig Viooltje
+## Inlezen data
+```{r}
+Ruig_viooltje_LMF_pre <- read_excel("Ruig_viooltje_LMF_pre.xlsx")
+```
+
+The first step is to convert the data from percentage to classes. 
+```{r}
+rdata = Ruig_viooltje_LMF_pre
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+
+The next step is to create the data that is going to be put in the model. The number of sites and years (read periods) are calculated and used as indeces for in the model. The cover data is split into a dataset with classes named M and with a dataset of presence-absence data named M1.
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+Next, the limits are written down for the ordinal part of the model. Also, some initial values are created to run the model. The parameters of interest are also written down that must be stored in the model results.  
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+Now we run the OZAB model with the data, initial values, parameters to save, JAGS code, number of chain, number of iterations and number of burn-in values. 
+```{r}
+model_lmf_ruig_viooltje = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+The final step is to check if the model has been converged by looking at the Rhat value if it is smaller than 1.1. If that is not the case, the number of iterations are increased in the next model run. 
+If the model is converged, the model results of the sims (simulations) are stored in a csv file. This file is later used in Trend_berekenen_classificeren_logitols.R to calculate the population trend based on cover unconditional mean. 
+```{r}
+model_lmf_ruig_viooltje$BUGSoutput$summary
+x = t((model_lmf_ruig_viooltje$BUGSoutput$sims.matrix))
+write.table(x=x,file="Ruig_viooltje_LMF_sims.csv",sep=";")
+```
+
+
+# Snavelzegge
+## Inlezen data
+```{r}
+Snavelzegge_LMF_pre <- read_excel("Snavelzegge_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Snavelzegge_LMF_pre
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_lmf_snavelzegge = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_lmf_snavelzegge$BUGSoutput$sims.matrix))
+write.table(x=x,file="Snavelzegge_LMF_sims.csv",sep=";")
+```
+
+
+
+# Goudzuring
+## Inlezen data
+```{r}
+Goudzuring_LMF_pre <- read_excel("Goudzuring_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Goudzuring_LMF_pre
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Goudzuring_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Goudzuring_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Goudzuring_LMF_sims.csv",sep=";")
+```
+# Blauwe Knoop
+## Inlezen data
+```{r}
+Blauwe_knoop_LMF_pre <- read_excel("Blauwe_knoop_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Blauwe_knoop_LMF_pre
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Blauwe_knoop_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Blauwe_knoop_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Blauwe_knoop_LMF_sims.csv",sep=";")
+```
+# Moeraskartelblad
+## Inlezen data
+```{r}
+Moeraskartelblad_LMF <- read_excel("Moeraskartelblad_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Moeraskartelblad_LMF
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Moeraskartelblad_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Moeraskartelblad_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Moeraskartelblad_LMF_sims.csv",sep=";")
+```
+# Knolboterbloem
+## Inlezen data
+```{r}
+Knolboterbloem_LMF <- read_excel("Knolboterbloem_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Knolboterbloem_LMF
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Knolboterbloem_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Knolboterbloem_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Knolboterbloem_LMF_sims.csv",sep=";")
+```
+
+# Parnassia
+## Inlezen data
+```{r}
+Parnassia_LMF <- read_excel("Parnassia_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Parnassia_LMF
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Parnassia_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Parnassia_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Parnassia_LMF_sims.csv",sep=";")
+```
+# Kleine veenbes
+## Inlezen data
+```{r}
+Kleine_veenbes_LMF <- read_excel("Kleine_veenbes_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Kleine_veenbes_LMF
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Kleine_veenbes_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Kleine_veenbes_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Kleine_veenbes_LMF_sims.csv",sep=";")
+```
+# Kleine leeuwentand
+## Inlezen data
+```{r}
+Kleine_leeuwentand_LMF <- read_excel("Kleine_leeuwentand_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Kleine_leeuwentand_LMF
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Kleine_leeuwentand_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Kleine_leeuwentand_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Kleine_leeuwentand_LMF_sims.csv",sep=";")
+```
+# Hengel
+## Inlezen data
+```{r}
+Hengel_LMF <- read_excel("Hengel_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Hengel_LMF
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Hengel_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Hengel_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Hengel_LMF_sims.csv",sep=";")
+```
+# Veenreukgras
+## Inlezen data
+```{r}
+Veenreukgras_LMF <- read_excel("Veenreukgras_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Veenreukgras_LMF
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Veenreukgras_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Veenreukgras_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Veenreukgras_LMF_sims.csv",sep=";")
+```
+# Bergbasterdwederik
+## Inlezen data
+```{r}
+Bergbasterdwederik_LMF <- read_excel("Bergbasterdwederik_LMF_pre.xlsx")
+```
+
+```{r}
+rdata = Bergbasterdwederik_LMF
+rdata_mv <- is.na(rdata[, "Bedekking"])
+rdata[rdata_mv, "Bedekking"] <- 9999 # tijdelijk NA weghalen zodat je de bedekkingen kan aanpassen zonder last van NA's
+    
+rdata$Countklasse <- NA
+    
+    for (r in 1: nrow(rdata)) {  
+      if (rdata[r, "Bedekking"] == 0 ) { rdata[r, "Countklasse"] <- 0 }
+      if (rdata[r, "Bedekking"] > 0    & rdata[r, "Bedekking"] <= 1 )   { rdata[r, "Countklasse"] <- 1}
+      if (rdata[r, "Bedekking"] > 1    & rdata[r, "Bedekking"] <= 2 )   { rdata[r, "Countklasse"] <- 2}
+      if (rdata[r, "Bedekking"] > 2    & rdata[r, "Bedekking"] <= 3 )   { rdata[r, "Countklasse"] <- 3}  
+      if (rdata[r, "Bedekking"] > 3    & rdata[r, "Bedekking"] <= 5)    { rdata[r, "Countklasse"] <- 4}
+      if (rdata[r, "Bedekking"] > 5    & rdata[r, "Bedekking"] <= 12.5) { rdata[r, "Countklasse"] <- 5}
+      if (rdata[r, "Bedekking"] > 12.5 & rdata[r, "Bedekking"] <= 25)   { rdata[r, "Countklasse"] <- 6}
+      if (rdata[r, "Bedekking"] > 25   & rdata[r, "Bedekking"] <= 50)   { rdata[r, "Countklasse"] <- 7}
+      if (rdata[r, "Bedekking"] > 50   & rdata[r, "Bedekking"] <= 75)   { rdata[r, "Countklasse"] <- 8}
+      if (rdata[r, "Bedekking"] > 75   & rdata[r, "Bedekking"] < 999)   { rdata[r, "Countklasse"] <- 9}
+      if (rdata[r, "Bedekking"] == 9999 )                            { rdata[r, "Countklasse"] <- NA }  # NA's er weer in zetten
+    }
+    
+
+#summary(rdata)
+```
+
+Nieuwe dataset aanmaken.
+
+```{r}
+nsite = length(unique(rdata$Plot))
+nyear = length(unique(rdata$Jaar))
+rdata$Bedekking      <- rdata$Countklasse
+rdata$Countklasse <- NULL
+rdata = rdata[order(rdata$Plot),]
+    # Fill matrices with data
+M   <- array(NA,dim=c(nsite,nyear))		
+   
+    for (t in 1:nyear) {
+      kp <- rdata[,"Jaar"]==t 	
+      
+      dcount <- rdata[kp, "Bedekking"] 	# bedekkingen in M 
+      
+      M[,t]  <- as.matrix(dcount) 	
+    }
+    
+    M1 <- M # alle data tbv psesentie/absentiemodel
+    M1[M1>1] <- 1  # om aantallen in presenties te veranderen
+    
+    # LET OP LET OP 
+    M[M==0] <- NA # de nullen in de data wegzetten als NA !!!!!!!!!!!!!! tbv bedekking model
+    # LET OP LET OP 
+    
+    # Mogelijk probleem in data laten zien; dat wordt aangepakt in de tryCatch procedure
+    # als er slechts 1 of 2 waarden in de hoogste klasse staan lukt model initialisie niet ("Current value is inconsistent with data")
+    Mhulp  <- M
+    Mhulp[is.na(Mhulp)] <- 0
+    
+    # verdeling aantal waarnemingen per klasse weergeven; aan slot van code kan die nodig zijn
+    klasse9 <- sum(Mhulp == 9)
+    klasse8 <- sum(Mhulp == 8)
+    klasse7 <- sum(Mhulp == 7)   
+    klasse6 <- sum(Mhulp == 6)
+    klasse5 <- sum(Mhulp == 5)
+    klasse4 <- sum(Mhulp == 4)   
+    klasse3 <- sum(Mhulp == 3)
+    klasse2 <- sum(Mhulp == 2)
+    klasse1 <- sum(Mhulp == 1) 
+```
+
+
+```{r, warning=F}
+limits <- c(1e-16, 0.01, 0.02, 0.03, 0.05, 0.125, 0.25, 0.50, 0.75, 0.99) # Vaatplanten aangepaste Braun-Blanquet indeling oorspronkelijk = Variant1 
+    # klasse           1     2     3     4     5      6     7     8     9    
+sumX = 4+5+6
+sumX2 = 16+25+36
+data <- list("M"=M, "nsite" = nsite, "nyear" = 6, "sumX" = sumX, "sumX2" = sumX2, "limits" = limits, "M1" = M1)
+    
+    # (2) Starting values
+    
+Nst <- apply(M, c(1,2), max, na.rm =TRUE)
+Nst[Nst==(-Inf)] <- 1
+Nst[Nst==(Inf)]  <- 1
+    
+    # Variant 1 Standaard
+    Nst[Nst ==1] <- 0.005 # omzetten in midpoints van bedekkingsklassen
+    Nst[Nst ==2] <- 0.015
+    Nst[Nst ==3] <- 0.025
+    Nst[Nst ==4] <- 0.04
+    Nst[Nst ==5] <- 0.08
+    Nst[Nst ==6] <- 0.18
+    Nst[Nst ==7] <- 0.38
+    Nst[Nst ==8] <- 0.63
+    Nst[Nst ==9] <- 0.88
+    
+inits <- function() {list (y.cover = Nst, a=rep(rnorm(1, 0, 1), nsite) , b=rep(rnorm(1, 0, 1), nyear), c=rep(rnorm(1, 0, 1), nsite), d=rep(rnorm(1, 0, 1), nyear)) } 
+
+parameters <- c("regres_mean_psi_logit", "regres_mean_mu_logit", "regres_mean_unconditional_cover_logit", "mean_unconditional_cover", "mean_psi", "mean_conditional_cover")
+```
+
+## model runnen original
+```{r}
+model_Bergbasterdwederik_LMF = jags(data = data, inits = inits, parameters.to.save = parameters, model.file = "Cover.txt", n.chains = 3, n.iter = 5000, n.burnin = 4000 ,jags.seed = 1234)
+```
+
+
+```{r}
+#model_lmf_snavelzegge$BUGSoutput$summary
+x = t((model_Bergbasterdwederik_LMF$BUGSoutput$sims.matrix))
+write.table(x=x,file="Bergbasterdwederik_LMF_sims.csv",sep=";")
+```
