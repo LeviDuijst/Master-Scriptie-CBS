@@ -1,0 +1,350 @@
+---
+title: "Creating datasets"
+output: pdf_document
+date: "2024-04-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This code has two purposes. 1) finding species that can be used for my research. 2) creating datasets of both cover and presence-absence that can be used to run the JAGS model. 
+
+This code section is used to create the datasets that are needed to run the models in JAGS. This is done for both the presence-absence data and the cover data. The created datasets are used for research projects 2 and 3. In this code, also the presence-absence dataset can be updated based on information from the cover dataset. 
+
+
+# Loading packages
+```{r}
+library(readxl)
+library(readr)
+library("writexl")
+library(caret)
+library(dplyr)
+```
+
+# Loading the big datasets of cover
+```{r}
+LMF_Tellingen <- read_delim("E:/Werk/Ontwikkel/Levi/Data/LMF_Moeder_Tellingen.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+```{r}
+LMF_Plot <- read_delim("E:/Werk/Ontwikkel/Levi/Data/LMF_Moeder_Plot.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+```{r}
+LMF_Kop <- read_delim("E:/Werk/Ontwikkel/Levi/Data/LMF_Moeder_Kop.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+```{r}
+LMF_Soorten = read_delim("E:/Werk/Ontwikkel/Levi/Data/LMF_Soorten.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+## Combining the datasets together
+```{r}
+Intermediate = merge(LMF_Tellingen,LMF_Plot, by = c("Plot", "Plot_id"))
+Totaal = merge(Intermediate,LMF_Kop[,1:17], by = c("Opname_id","Plot_id","Plot","Jaar") )
+Totaal = merge(Totaal, LMF_Soorten, by = c("Soortcode"))
+Totaal = Totaal[Totaal$Cyclusnr !=0,]
+```
+
+## Selecting the needed columns 
+```{r}
+Sub = Totaal[,c(1:4,6,7,9,12,13,17:19,21:23,39,46,54,55)] #The wanted columns
+names(Sub)[16] = "Jaar"
+Sub$Aanwezig = ifelse(Sub$Bedekking>0,1,0) #Creating new column with binary outcome of presence-absence
+Sub = Sub[!is.na(Sub$Jaar),]
+Sub = unique(Sub) #Removing duplicates
+```
+The final dataframe of Sub contains all needed information to create cover datasets. 
+
+# Loading the big datasets of FLORON
+```{r}
+Soorten = read_delim("FLO_soorten.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+FLO = FLO_oppdataC1 
+FLO = FLO[FLO$Databron == 1,] #Here I removed data source 3 and 4
+FLO = FLO[FLO$Aantalsoorten>=75,] #Only species with 75 or more datapoints are selected
+```
+
+```{r}
+Tot_Flo = merge(FLO,Soorten, by = c("Soortcode"))
+Tot_Flo = Tot_Flo[,c(1:12,14)] #Selecting columns 
+Tot_Flo$Jaar <- gsub("190","",as.character(Tot_Flo$Jaar))
+```
+
+The final dataframe of Tot_Flo contains all needed information to create presence-absence datasets. 
+
+# Finding suitable species 
+
+## Reading output data
+Below, the population trends and standard error of all species for both the cover dataset (LMF) as the presence-absence dataset (FLO) are read in the code. 
+```{r}
+LMF_output = read_delim("E:/Werk/Ontwikkel/Levi/Output/SWAN_LMF_COV_6_2022.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+LMF_output[LMF_output$Nednaam == "Dicht havikskruid s.l.",]$Nednaam = "Dicht havikskruid"
+FLO_output = read_delim("E:/Werk/Ontwikkel/Levi/Output/SWAN_FLO_OCC1_2021.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+Below I find the overlap of species between the two datasets. In total, 620 species are both presence in the cover and presence-absence dataset. 
+```{r}
+overlap = (intersect(LMF_output$Nednaam, FLO_output$Nednaam))
+LMF_bedekking = LMF_output[LMF_output$Nednaam %in% overlap,]
+FLO_verspreiding = FLO_output[FLO_output$Nednaam %in% overlap,]
+```
+
+Now I select again only the columns of interest for both datasets. 
+```{r}
+FLO_verspreiding = FLO_verspreiding[,c(4,5,8,13,14,15,18)]
+FLO_verspreiding = FLO_verspreiding[FLO_verspreiding$Stratum_omschrijving == "Nederland",]
+FLO_verspreiding = na.omit(FLO_verspreiding)
+
+# Omzetten van character naar numeric, maar eerst nog de komma naar punt veranderen
+FLO_verspreiding$Multipl_trend_vanaf = as.numeric(gsub(",", ".", FLO_verspreiding$Multipl_trend_vanaf))
+
+FLO_verspreiding$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", FLO_verspreiding$Multipl_trend_se_vanaf))
+```
+
+```{r}
+LMF_bedekking = LMF_bedekking[,c(4,5,13,14,15,18)]
+LMF_bedekking = LMF_bedekking[LMF_bedekking$Recordtype_naam == "cover",]
+
+
+# Omzetten van character naar numeric, maar eerst nog de komma naar punt veranderen
+LMF_bedekking$Multipl_trend_vanaf = as.numeric(gsub(",", ".", LMF_bedekking$Multipl_trend_vanaf))
+
+LMF_bedekking$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", LMF_bedekking$Multipl_trend_se_vanaf))
+```
+
+# Presence-absence
+Here below, I used a pipe function to see how many data points, so how many times a plant was detected overall visited quadrants This give an indication how common or rare a species is. 
+```{r}
+Aantal_FLO = Tot_Flo %>%
+  group_by(Nednaam) %>%
+  summarise(sum(Aantal))
+
+Aantal_FLO[order(Aantal_FLO$`sum(Aantal)`, decreasing =T ),]
+```
+
+# Cover data
+The same thing as above, but now for the cover data. I looked at how many times a species was detected over all visited plots. 
+```{r}
+Aantal_LMF = Sub %>%
+  group_by(Nednaam) %>%
+  summarise(sum(Aanwezig)) 
+
+Aantal_LMF[order(Aantal_LMF$`sum(Aanwezig)`, decreasing =T ),]
+```
+
+Based on the total number of ones, I selected my species that were used for Part 2 and 3. I mostly wanted species below 10.000 ones, because species with higher values have thus more data and thus it takes a longer time to run the models. My laptop could not handle species with more than 10.000 ones. But the species should also have a decent amount of data points to be run in the model. So species with less than 100 ones are also ignored. 
+
+# The selection of species for Part 2
+Species that benefits the most with additional data are the ones with an uncertain trend. So I selected the species in the presence-absence data (FLORON) if there trend was uncertain. Then I compared those species with the ones in the cover data set to see what their trend is.
+
+Species with an uncertain trend in both presence-absence and cover data.
+```{r}
+onzeker = FLO_verspreiding[FLO_verspreiding$Multipl_trend_category_vanaf == "Onzeker",]$Nednaam #Species with an uncertain trend in presence-absence data
+onzeker_LMF = LMF_bedekking[LMF_bedekking$Nednaam %in% onzeker,]
+onzeker_LMF[onzeker_LMF$Multipl_trend_category_vanaf == "Onzeker",]
+```
+
+Species with an uncertain trend in the presence-absence data, but a certain trend in the cover data.
+```{r}
+onzeker_LMF[onzeker_LMF$Multipl_trend_category_vanaf != "Onzeker",]
+```
+
+
+With all these information and criteria, I selected 11 species with an uncertain and 8 species with a certain trend in the presence-absence data. 
+
+With this lines of code, I can look what the class of the population trends are for both presence-absence and cover data, respectively.
+```{r}
+FLO_verspreiding[FLO_verspreiding$Nednaam == "Ruig viooltje",]$Multipl_trend_category_vanaf #Species name can be changed
+LMF_bedekking[LMF_bedekking$Nednaam == "Ruig viooltje",]$Multipl_trend_category_vanaf #Species name can be changed
+```
+
+With these lines I can look how much data of ones are present in both datasets for each species.  
+```{r}
+Aantal_FLO[Aantal_FLO$Nednaam == "Goudzuring",] #Species name can be changed
+Aantal_LMF[Aantal_LMF$Nednaam == "Goudzuring",] #Species name can be changed
+```
+
+# Creating and updating datasets
+In this section, I create the datasets of both cover as presence-absence data that are used to run the JAGS models. Also, both datasets can be updated if wanted. 
+
+## Selection of the plant species
+The first step is to select the species to create the datasets.
+```{r}
+LMF_data = Sub[Sub$Nednaam == "Bergbasterdwederik" ,]
+FLO_data = Tot_Flo[Tot_Flo$Nednaam == "Moeraskartelblad",]
+```
+
+## Creating the Cover data
+The only information that is needed, is the Plot name, the year (jaar), the cover value and the coordinates (indicates in which quadrant the plot reside). All the information in the LMF_data frame is used and converted to a long format of the data. Also, the zeroes are added to the dataframe too. If the reader wants, the Fgr and the surface area of the plot can be added too in the new dataframe (now it is disabled). 
+```{r}
+DF_LMF = data.frame(Plot = character(), 
+                 Jaar = integer(), 
+                 Bedekking = integer(),
+                Coordinaten = integer()) 
+
+
+for(i in 1:length(unique(LMF_data$Plot))){
+    ind = 1+6*(i-1)
+    Plot = unique(LMF_data$Plot)[i]
+    for(j in 1:6){
+    
+      #If the percentage is higher than a 0, that means there is data
+      if(length(LMF_data$Bedekking[LMF_data$Plot == Plot & LMF_data$Jaar == j]) >0){
+        DF_LMF[ind,1] = Plot
+        DF_LMF[ind,2] = j
+        DF_LMF[ind,3] = (LMF_data$Bedekking[LMF_data$Plot == Plot & LMF_data$Jaar == j])
+        DF_LMF[ind,4] =  unique(LMF_data$Coordinaten[LMF_data$Plot == Plot ])
+        #DF_LMF[ind,5] = unique(LMF_data$Fgr[LMF_data$Plot == Plot ])
+        #DF_LMF[ind,6] = max(unique(LMF_data$Oppervlakte[LMF_data$Plot == Plot ]))
+        ind = ind+1
+      } #If the year was not present in the data for a plot, then no info is available
+      else if((j %in% unique(Sub$Jaar[Sub$Plot == Plot])) == F ){
+        DF_LMF[ind,1] = Plot
+        DF_LMF[ind,2] = j
+        DF_LMF[ind,3] = NA
+        DF_LMF[ind,4] =  unique(LMF_data$Coordinaten[LMF_data$Plot == Plot ])
+        #DF_LMF[ind,5] = unique(LMF_data$Fgr[LMF_data$Plot == Plot ])
+        #DF_LMF[ind,6] = max(unique(LMF_data$Oppervlakte[LMF_data$Plot == Plot ]))
+        ind = ind+1
+      
+      } #If the previous line was false, then there is data, only the species was not found, thus a zero is added
+      else{
+        DF_LMF[ind,1] = Plot
+        DF_LMF[ind,2] = j
+        DF_LMF[ind,3] = 0 
+        DF_LMF[ind,4] = unique(LMF_data$Coordinaten[LMF_data$Plot == Plot ])
+        #DF_LMF[ind,5] = unique(LMF_data$Fgr[LMF_data$Plot == Plot ])
+        #DF_LMF[ind,6] = max(unique(LMF_data$Oppervlakte[LMF_data$Plot == Plot ]))
+        ind = ind+1
+      }
+    
+    }
+}
+```
+
+
+## Creating the Presence-Absence data
+The same thing as with the cover data. The data is converted from a wide to a long format and zeroes are added to the dataset. The only values that are kept are the Coordinates of the quandrants, the year, the presence/absence (1/0) and the number of species found in the quandrant (Aantal). 
+```{r}
+DF_FLO = data.frame(Coordinaten = integer(), 
+                 Jaar = integer(), 
+                 Aanwezig = integer(),
+                 Aantal = integer())
+
+
+
+for(i in 1:length(unique(FLO_data$Coordinaten))){
+    ind = 1+6*(i-1)
+    sites = unique(FLO_data$Coordinaten)[i]
+    for(j in 1:6){
+      #If the percentage is higher than a 0, that means there is data
+      if(j %in% unique(FLO_data$Jaar[FLO_data$Coordinaten == sites])){
+        DF_FLO[ind,1] = sites
+        DF_FLO[ind,2] = j
+        DF_FLO[ind,3] = 1
+        DF_FLO[ind,4] = unique(FLO_data$Aantalsoorten[FLO_data$Coordinaten == sites & FLO_data$Jaar==j])
+        ind = ind+1
+
+    
+      
+      
+      } #If the year was not present in the data for a plot, then no info is available
+      else if(j %in% unique(Tot_Flo$Jaar[Tot_Flo$Coordinaten == sites]) == F){
+        DF_FLO[ind,1] = sites
+        DF_FLO[ind,2] = j
+        DF_FLO[ind,3] = NA
+        DF_FLO[ind,4] = NA
+        ind = ind+1
+        
+      }
+      #If the previous line was false, then there is data, only the species was not found, thus a zero is added
+      else{
+        DF_FLO[ind,1] = sites
+        DF_FLO[ind,2] = j
+        DF_FLO[ind,3] = 0
+        DF_FLO[ind,4] = unique(Tot_Flo$Aantalsoorten[Tot_Flo$Coordinaten == sites & Tot_Flo$Jaar==j])
+        ind = ind+1
+        
+      }
+    }
+}
+```
+
+## Updating the presence-absence data
+Here is how I updated the presence-absence dataset based on information form the cover data. First I checked if there is overlap with the two datasets. Then I check for each quadrant/coordinate if cover plots reside in it. If that is true, then I check if a percentage value was noted that was higher than 0. If that was the case, then the species was present at that time period and thus a 1 can be added to the presence-absence dataset. Do note, only ones can be added to the dataset, no zeroes. 
+```{r}
+DF_LMF_up = DF_LMF
+DF_FLO_up = DF_FLO
+
+overlap = intersect(DF_FLO$Coordinaten, DF_LMF$Coordinaten)
+df = DF_LMF[,1:4]
+df = na.omit(df)
+
+if(length(overlap) >0){
+for(i in 1:length(overlap)){
+  coordinaat = overlap[i]
+  for(j in 1:6){
+    if(length(df[df$Coordinaten==coordinaat & df$Jaar ==j,]$Bedekking)>0){
+      if(max(df[df$Coordinaten==coordinaat & df$Jaar ==j,]$Bedekking)>0){
+        DF_FLO_up[DF_FLO_up$Coordinaten == coordinaat & DF_FLO_up$Jaar == j,]$Aanwezig = 1
+    }
+  }
+  }
+}
+}
+
+```
+
+## Updating the cover dataset
+This is how I updated the cover dataset. Only zeroes could be added to the cover data. First I check if the coordinates overlap with both datasets. If there is overlap in the coordinates, I check how many plots are present in a quadrant with an absent of the species. If that is the case, then I use a for loop to run through the number of plots in the quadrant. If there is a NA, then it can be replaced with a 0. In any other case, nothing happens. This is done for each quadrant that has overlap with the cover dataset. 
+```{r}
+df2 = na.omit(DF_FLO)
+if(length(overlap) >0){
+for(i in 1:length(overlap)){
+  coordinaat = overlap[i]
+  for(j in 1:6){
+    if(length(df2[df2$Coordinaten==coordinaat & df2$Jaar ==j,]$Aanwezig)>0){
+      if(df2[df2$Coordinaten==coordinaat & df2$Jaar ==j,]$Aanwezig == 0){
+        plot = unique(DF_LMF_up$Plot[DF_LMF_up$Coordinaten == coordinaat & DF_LMF_up$Jaar == j])
+        for(k in 1:length(plot)){
+          if(is.na(DF_LMF_up[DF_LMF_up$Plot == plot[k] & DF_LMF_up$Jaar == j,]$Bedekking)){
+            DF_LMF_up[DF_LMF_up$Plot == plot[k] & DF_LMF_up$Jaar == j,]$Bedekking = 0
+          }
+        }
+        
+    }
+  }
+  }
+}
+}
+
+```
+
+
+In the end, I counted how many ones or zeroes, depending on which data set, are present in the original and updated dataset. This gives me an idea how much data is added with this technique. 
+```{r}
+sum(DF_FLO$Aanwezig==1,na.rm=T)
+sum(DF_FLO_up$Aanwezig==1, na.rm=T)
+
+
+#sum(DF_LMF$Bedekking==0,na.rm=T)
+#sum(DF_LMF_up$Bedekking==0, na.rm=T)
+
+```
+
+## Converting to a Excel file
+The final step is converting the datasets to a xlsx file, which can be later used for the code of Project 2 and 3 to run the JAGS models. 
+```{r}
+#write_xlsx(DF_FLO, "E:/Werk/Ontwikkel/Levi/Data/Moeraskartelblad_FLO_pre.xlsx")
+#write_xlsx(DF_FLO_up, "E:/Werk/Ontwikkel/Levi/Data/Bergbasterdwederik_FLO_post.xlsx")
+write_xlsx(DF_LMF, "E:/Werk/Ontwikkel/Levi/Data/Bergbasterdwederik_LMF_pre.xlsx")
+#write_xlsx(DF_LMF_up, "E:/Werk/Ontwikkel/Levi/Data/Dagkoekoeksbloem_LMF_post.xlsx")
+```
