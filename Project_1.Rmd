@@ -1,0 +1,1083 @@
+---
+title: "Project 1"
+output: pdf_document
+date: "2024-04-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This code belongs to the first research Part of my thesis project. In this part, I look at the difference in population trends between the two datasets of presence-absence and cover data. 
+
+# Loading packages
+```{r}
+library(readxl)
+library(readr)
+library("writexl")
+library(caret)
+library(dplyr)
+library(ggplot2)
+library(car)
+```
+
+# Loading the big datasets of cover
+```{r}
+LMF_Tellingen <- read_delim("E:/Werk/Ontwikkel/Levi/Data/LMF_Moeder_Tellingen.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+```{r}
+LMF_Plot <- read_delim("E:/Werk/Ontwikkel/Levi/Data/LMF_Moeder_Plot.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+```{r}
+LMF_Kop <- read_delim("E:/Werk/Ontwikkel/Levi/Data/LMF_Moeder_Kop.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+```{r}
+LMF_Soorten = read_delim("E:/Werk/Ontwikkel/Levi/Data/LMF_Soorten.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+## Combining the datasets together
+```{r}
+Intermediate = merge(LMF_Tellingen,LMF_Plot, by = c("Plot", "Plot_id"))
+Totaal = merge(Intermediate,LMF_Kop[,1:17], by = c("Opname_id","Plot_id","Plot","Jaar") )
+Totaal = merge(Totaal, LMF_Soorten, by = c("Soortcode"))
+Totaal = Totaal[Totaal$Cyclusnr !=0,]
+```
+
+## Selecting the needed columns 
+```{r}
+Sub = Totaal[,c(1:4,6,7,9,12,13,17:19,21:23,39,46,54,55)] #The wanted columns
+names(Sub)[16] = "Jaar"
+Sub$Aanwezig = ifelse(Sub$Bedekking>0,1,0) #Creating new column with binary outcome of presence-absence
+Sub = Sub[!is.na(Sub$Jaar),] #Removing NAs from the dataframe
+Sub = unique(Sub) #Removing duplicates
+```
+The final dataframe of Sub contains all needed information to create cover datasets. 
+
+# Loading the big datasets of FLORON
+```{r}
+Soorten = read_delim("FLO_soorten.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+FLO = FLO_oppdataC1 
+FLO = FLO[FLO$Databron == 1,] #Here I removed data source 3 and 4
+FLO = FLO[FLO$Aantalsoorten>=75,] #Only species with 75 or more datapoints are selected
+```
+
+```{r}
+Tot_Flo = merge(FLO,Soorten, by = c("Soortcode"))
+Tot_Flo = Tot_Flo[,c(1:12,14,15)] #Selecting columns 
+Tot_Flo$Jaar <- gsub("190","",as.character(Tot_Flo$Jaar))
+
+overlap = intersect(unique(Tot_Flo$Nednaam), unique(Sub$Nednaam))
+```
+
+The final dataframe of Tot_Flo contains all needed information to create presence-absence datasets. 
+
+
+# Reading in output data
+The output data contains the trend estimations and the confidence intervals. This is the main information that I need to do the analysis for this research.
+```{r}
+LMF_output = read_delim("E:/Werk/Ontwikkel/Levi/Output/SWAN_LMF_COV_6_2022.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+LMF_output[LMF_output$Nednaam == "Dicht havikskruid s.l.",]$Nednaam = "Dicht havikskruid"
+FLO_output = read_delim("E:/Werk/Ontwikkel/Levi/Output/SWAN_FLO_OCC1_2021.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+```{r}
+overlap = (intersect(LMF_output$Nednaam, FLO_output$Nednaam))
+LMF_verspreiding = LMF_output[LMF_output$Nednaam %in% overlap,]
+FLO_verspreiding = FLO_output[FLO_output$Nednaam %in% overlap,]
+length(overlap)
+```
+There is a total of 620 species that have a population trend based on both datasets. 
+
+Further selection on the data. I only selected that columns that I need for the analysis. I also selected for the presence-absence data only the results of all the Netherlands. 
+```{r}
+FLO_verspreiding = FLO_verspreiding[,c(4,5,8,13,14,15,18)]
+FLO_verspreiding = FLO_verspreiding[FLO_verspreiding$Stratum_omschrijving == "Nederland",]
+FLO_verspreiding = na.omit(FLO_verspreiding)
+
+# Omzetten van character naar numeric, maar eerst nog de komma naar punt veranderen
+FLO_verspreiding$Multipl_trend_vanaf = as.numeric(gsub(",", ".", FLO_verspreiding$Multipl_trend_vanaf))
+
+FLO_verspreiding$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", FLO_verspreiding$Multipl_trend_se_vanaf))
+```
+
+
+## Plotting all presence-absence output
+Below, I order the results from decrease to increase in population trend with their confidence interval to have an idea how the data looks like. Also, the corresponding classes are added. 
+```{r}
+GG = FLO_verspreiding[order(FLO_verspreiding$Multipl_trend_vanaf, decreasing = T),]
+GG$index = order(GG$Multipl_trend_vanaf, decreasing = T)
+GG$index = as.factor(GG$index)
+```
+
+```{r}
+pd = position_dodge(.2)    ### How much to jitter the points on the plot
+
+ggplot(GG[-1,],                
+       aes(y = index,
+            x    =  Multipl_trend_vanaf,
+       color = Multipl_trend_category_vanaf)) +
+
+    geom_point(shape = 20,
+               size  = 3,
+             position = pd) +
+
+    geom_errorbar(aes(xmin = Multipl_trend_vanaf - 1.96*Multipl_trend_se_vanaf,
+                      xmax = Multipl_trend_vanaf + 1.96*Multipl_trend_se_vanaf),
+                      width = 0.2,
+                      size  = 0.7,
+                      position = pd) +
+    geom_vline(xintercept=1) +
+
+    theme_bw() +
+    theme(axis.title = element_text(face = "bold"),
+          axis.text=element_text(size=6),
+           axis.text.y =element_blank() , axis.ticks.y =element_blank() ) +
+
+    xlab("Slope size")
+```
+
+## Selectie op psi
+Now I select only the correct columns for the cover data.
+With cover data, multiple trends are calculated for each species. One based on the mean given the surface area, one trend based on probability of detection (just like the one based on presence-absence data, named psi) and the main trend of interest based on cover indepdently of surface area (called cover).
+```{r}
+LMF_verspreiding = LMF_verspreiding[,c(4,5,13,14,15,18)]
+LMF_cover = LMF_verspreiding[LMF_verspreiding$Recordtype_naam == "cover",] #Trend based on unconditional mean
+LMF_verspreiding = LMF_verspreiding[LMF_verspreiding$Recordtype_naam == "psi",] #Trend based on probability of detection
+
+
+LMF_verspreiding_beide = LMF_verspreiding[LMF_verspreiding$Recordtype_naam == "psi" | LMF_verspreiding$Recordtype_naam == "cover",]
+
+# Omzetten van character naar numeric, maar eerst nog de komma naar punt veranderen
+LMF_verspreiding$Multipl_trend_vanaf = as.numeric(gsub(",", ".", LMF_verspreiding$Multipl_trend_vanaf))
+
+LMF_verspreiding$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", LMF_verspreiding$Multipl_trend_se_vanaf))
+
+
+LMF_cover$Multipl_trend_vanaf = as.numeric(gsub(",", ".", LMF_cover$Multipl_trend_vanaf))
+
+LMF_cover$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", LMF_cover$Multipl_trend_se_vanaf))
+```
+
+Next, I plot the trend lines for all 620 species based on the unconditional mean (cover) with the cover dataset. 
+```{r}
+FF = LMF_cover[order(LMF_cover$Multipl_trend_vanaf, decreasing = T),]
+FF$index = order(FF$Multipl_trend_vanaf, decreasing = T)
+FF$index = as.factor(FF$index)
+```
+
+
+```{r}
+pd = position_dodge(.2)    ### How much to jitter the points on the plot
+
+ggplot(FF[,],                
+       aes(y = index,
+            x    =  Multipl_trend_vanaf,
+       color = Multipl_trend_category_vanaf)) +
+
+    geom_point(shape = 20,
+               size  = 3,
+             position = pd) +
+
+    geom_errorbar(aes(xmin = Multipl_trend_vanaf - 1.96*Multipl_trend_se_vanaf,
+                      xmax = Multipl_trend_vanaf + 1.96*Multipl_trend_se_vanaf),
+                      width = 0.2,
+                      size  = 0.7,
+                      position = pd) +
+    geom_vline(xintercept=1) +
+
+    theme_bw() +
+    theme(axis.title = element_text(face = "bold"),
+          axis.text=element_text(size=6),
+           axis.text.y =element_blank() , axis.ticks.y =element_blank() ) +
+
+    xlab("Slope size")
+```
+
+
+
+
+## Table
+This table shows how much species are in each classes for both datasets. 
+```{r}
+trend_cat = as.data.frame(matrix(data=NA, nrow = 1240, ncol =2, dimnames = list(c(),c("category","type"))))
+
+trend_cat$category = c(LMF_cover$Multipl_trend_category_vanaf, FLO_verspreiding$Multipl_trend_category_vanaf)
+trend_cat$type = c(rep("LMF",620),rep("FLORON",620))
+table(trend_cat$category,trend_cat$type)
+```
+There are a lot of uncertain (onzeker) trends with the cover (LMF) data compared to the presence-absence data (FLORON). 
+
+## Plotting trend lines
+```{r}
+Beide = cbind(LMF_cover[,c(1,2,3,4)],FLO_verspreiding[,c(4,5)])
+Beide = Beide[-619,]
+
+#Plot with trend estimations of all species
+plot(Beide[,3], Beide[,5], xlab = "LMF trend slope", ylab= "FLO trend slope", main = "Trend slopes of all species")
+abline(a=0, b=1)
+abline(v = 1, col = "red")
+abline(h = 1, col = "blue")
+#arrows(x0 = trend[,2], y0 = (trend[,2] - trend[,3]), length=0.05, angle=90, code=3)
+
+# Plot with the SE of all species
+plot(Beide[,4], Beide[,6], xlab = "LMF standard error of slope", ylab = "FLO standard error of slope", main = "Standard error of slopes of all species")
+abline(a=0, b=1)
+```
+
+These two plots give an indication how the data looks like for both datasets. It can be observed that the results of the trend from the presence-absence data are closer to one than the cover data. 
+Also, the standard errors of the presence-absence data are almost in every case smaller when compared to the SE based on the cover data. 
+
+# The analysis
+## Roze lijst or Pink list
+First we read in the Pink List. We also add two species to the list, because these two species were of interest for FLORON.  
+```{r}
+roze_lijst =read_excel("Selectie Roze Lijst.xlsx")
+soort1 = c("Silene flos-cuculi","Echte koekoeksbloem","TNB")
+soort2 = c("Cardamine pratensis","Pinksterbloem","TNB")
+roze_lijst = rbind(roze_lijst,soort1,soort2)
+```
+
+Creating a dataframe with the total number of times a species was detected for both the presence-absence as cover data.
+```{r}
+Aantal_FLO = Tot_Flo %>%
+  group_by(Nednaam) %>%
+  summarise(sum(Aantal))
+
+Aantal_FLO[order(Aantal_FLO$`sum(Aantal)`, decreasing =T ),]
+```
+
+```{r}
+Aantal_LMF = Sub %>%
+  group_by(Nednaam) %>%
+  summarise(sum(Aanwezig)) 
+
+Aantal_LMF[order(Aantal_LMF$`sum(Aanwezig)`, decreasing =T ),]
+```
+
+## Pink list critaria selection
+An additional species can be used, but its name was different in the cover data. So I converted the name as the same one that is noted in the presence-absence data. 
+```{r}
+Aantal_LMF[Aantal_LMF$Nednaam == "Dicht havikskruid s.l.",]$Nednaam = "Dicht havikskruid"
+```
+
+First we select on species with 25 or more presence data points in both datasets. This is to keep at least a minimum of how many times a species must be detected to do proper analysis. The other criteria step is to included only species that are on the the Pink List. 
+```{r}
+sub_roze_LMF = Aantal_LMF[Aantal_LMF$Nednaam %in% roze_lijst$`Nederlandse naam` & Aantal_LMF$`sum(Aanwezig)`>=25,]
+sub_roze_FLO = Aantal_FLO[Aantal_FLO$Nednaam %in% roze_lijst$`Nederlandse naam` & Aantal_FLO$`sum(Aantal)`>=25,]
+```
+
+
+I remove the two waterplant species Waterviolier and watertorkruid because there method of distribution is too different than of landplants.  
+```{r}
+filtered_roze_lijst = (intersect(sub_roze_LMF$Nednaam, sub_roze_FLO$Nednaam))
+filtered_roze_lijst = filtered_roze_lijst[-c(76,77)]
+length(filtered_roze_lijst)
+```
+This selection of species on the Pink List bring a total of 82 species that can be used. 
+
+
+In the next section, we select the left over Pink Species from the cover and presence-absence datasets. 
+
+### Selection Pink Species cover data
+```{r}
+LMF_output_sub = LMF_output[LMF_output$Nednaam %in% filtered_roze_lijst,][,c(5,13,14,15,25,34)]
+
+LMF_output_sub = na.omit(LMF_output_sub)
+#Hier selecteer ik op cover, maar doe ik het omslachtig 
+LMF_output_sub = LMF_output_sub[seq(1,length(LMF_output_sub$Nednaam)-1,3),]
+
+
+# Omzetten van character naar numeric, maar eerst nog de komma naar punt veranderen
+LMF_output_sub$Multipl_trend_vanaf = as.numeric(gsub(",", ".", LMF_output_sub$Multipl_trend_vanaf))
+
+LMF_output_sub$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", LMF_output_sub$Multipl_trend_se_vanaf))
+
+```
+
+### Selection Pink Species presence-absence data
+```{r}
+FLO_output_sub = FLO_output[FLO_output$Nednaam %in% filtered_roze_lijst,][,c(5,8,13:15,31)]
+FLO_output_sub = na.omit(FLO_output_sub)
+FLO_output_sub = FLO_output_sub[FLO_output_sub$Stratum_omschrijving == "Nederland",]
+FLO_output_sub$Multipl_trend_vanaf = as.numeric(gsub(",", ".", FLO_output_sub$Multipl_trend_vanaf))
+
+FLO_output_sub$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", FLO_output_sub$Multipl_trend_se_vanaf))
+```
+
+
+```{r}
+soorten_afname = intersect(LMF_output_sub$Nednaam, FLO_output_sub$Nednaam)
+soorten_afname
+```
+A total of 69 species are selected from the Pink List and that are available in both datasets. 
+
+ 
+```{r}
+LMF_output_sub = LMF_output_sub[LMF_output_sub$Nednaam %in% soorten_afname,]
+FLO_output_sub = FLO_output_sub[FLO_output_sub$Nednaam %in% soorten_afname,]
+```
+
+
+Here I create new datasets with both the trend together with the standard error.
+```{r}
+LMF_slope = LMF_output_sub[,c(1,2,3,4)]
+LMF_slope$type = "LMF"
+FLO_slope = FLO_output_sub[,c(1,3,4,5)]
+FLO_slope$type = "FLORON"
+slopes = rbind(LMF_slope,FLO_slope)
+```
+
+## LMF Distribution
+Now I will look at the psi (probability of detection) based on the cover data and compared these trend estimations with the ones from FLORON/presence-absence data. The reason is that the both trends of the same species should be in the same direction or at least have overlap in the confidence interval. This is needed, because otherwise I cannot compare the trend based on total mean cover with the trend based on probability of detection of the presence-absence data. 
+
+```{r}
+LMF_slope_psi = LMF_verspreiding[,c(2,3,4,5)]
+LMF_slope_psi$type = "LMF"
+slopes_psi = rbind(LMF_slope,FLO_slope)
+```
+
+
+```{r}
+pd = position_dodge(.2)    ### How much to jitter the points on the plot
+
+ggplot(slopes_psi[-18,],     ### Grote varkenskers eruit gehaald vanwege de grote SE
+       aes(y    =  Nednaam,
+            x    =  Multipl_trend_vanaf,
+          color = type)) +
+
+    geom_point(shape = 20,
+               size  = 3,
+             position = pd) +
+
+    geom_errorbar(aes(xmin = Multipl_trend_vanaf - 1.96*Multipl_trend_se_vanaf,
+                      xmax = Multipl_trend_vanaf + 1.96*Multipl_trend_se_vanaf),
+                      width = 0.2,
+                      size  = 0.7,
+                      position = pd) +
+    geom_vline(xintercept=1) +
+
+    theme_bw() +
+    theme(axis.title = element_text(face = "bold"),
+          axis.text=element_text(size=6)) +
+
+    ylab("Species Name") +
+    xlab("Slope size") +
+    xlab("Multiplicative trend") +
+    scale_color_discrete(
+    labels = c("Presence-absent disitrbution", 
+               "Cover disitrbution")
+    ) +
+    labs(color = "Data set")
+```
+This plot is a visual representation if the trend estimations based on similar data go in the same direction or have overlap.
+
+However, I also can test this if it is the case for all 69 species. 
+First I calculated the boundaries of the confidence interval for all species. 
+```{r}
+slopes_psi$low_bound = slopes_psi$Multipl_trend_vanaf - slopes_psi$Multipl_trend_se_vanaf * 1.96
+slopes_psi$up_bound = slopes_psi$Multipl_trend_vanaf + slopes_psi$Multipl_trend_se_vanaf * 1.96
+```
+
+Then I run through all 69 species to see if they have the same direction in the trend or overlap in confidence interval. If at least one of the two are true, then a 1 is assigned to the species meaning that I can use that species. If it is a 0, then the trend estimations are different and thus I cannot use that species for further analysis. 
+```{r}
+for(i in 1:69){
+  if(slopes_psi[slopes_psi$type == "FLORON",]$low_bound[i] >= slopes_psi[slopes_psi$type == "LMF",]$low_bound[i] & slopes_psi[slopes_psi$type == "FLORON",]$low_bound[i] <= slopes_psi[slopes_psi$type == "LMF",]$up_bound[i]) {
+    slopes_psi$zelfde_richting[i] = 1
+  }
+else if(slopes_psi[slopes_psi$type == "FLORON",]$up_bound[i] >= slopes_psi[slopes_psi$type == "LMF",]$low_bound[i] & slopes_psi[slopes_psi$type == "FLORON",]$up_bound[i] <= slopes_psi[slopes_psi$type == "LMF",]$up_bound[i]){
+    slopes_psi$zelfde_richting[i] = 1
+}
+  else{
+    slopes_psi$zelfde_richting[i] = 0
+  }
+}
+
+naam = slopes_psi[slopes_psi$zelfde_richting ==0,]$Nednaam
+
+
+for(i in 1:69){
+  if(slopes_psi[slopes_psi$type == "LMF",]$zelfde_richting[i] == 0){
+    if(slopes_psi[slopes_psi$type == "FLORON",]$Multipl_trend_vanaf[i] < 1 & slopes_psi[slopes_psi$type == "LMF",]$Multipl_trend_vanaf[i] <1){
+      slopes_psi$zelfde_richting[i] = 1
+    }
+    else if(slopes_psi[slopes_psi$type == "FLORON",]$Multipl_trend_vanaf[i] > 1 & slopes_psi[slopes_psi$type == "LMF",]$Multipl_trend_vanaf[i] >1){
+      slopes_psi$zelfde_richting[i] = 1
+    }
+    else{
+      slopes_psi$zelfde_richting[i] = 0
+    }
+  }
+}
+slopes_psi$zelfde_richting[1:69] #I only need the first 69 rows
+```
+
+These five species showed opposite population trend with both distribution. This would indicate that the occupancy of these species in the two datasets are not similar and makes the comparison between distribution and cover invalid. 
+
+Here I remove those 5 species from the dataset. 
+```{r}
+verschillend = slopes_psi[slopes_psi$zelfde_richting == 0,]$Nednaam
+```
+
+```{r}
+for(i in 1:5){
+  slopes = slopes[slopes$Nednaam != verschillend[i],]
+}
+```
+
+
+## Comparing the two datasets
+First, I plot the 64 species with their trend estimation based on total mean cover and distribution of the presence-absence data. 
+```{r}
+pd = position_dodge(.2)    ### How much to jitter the points on the plot
+
+ggplot(slopes[-18,],      ### Grote varkenskers eruit gehaald vanwege de grote SE
+       aes(y    =  Nednaam,
+            x    =  Multipl_trend_vanaf,
+          color = type)) +
+
+    geom_point(shape = 20,
+               size  = 3,
+             position = pd) +
+
+    geom_errorbar(aes(xmin = Multipl_trend_vanaf - 1.96*Multipl_trend_se_vanaf,
+                      xmax = Multipl_trend_vanaf + 1.96*Multipl_trend_se_vanaf),
+                      width = 0.2,
+                      size  = 0.7,
+                      position = pd) +
+    geom_vline(xintercept=1) +
+
+    theme_bw() +
+    theme(axis.title = element_text(face = "bold"),
+          axis.text=element_text(size=6)) +
+
+    ylab("Species Name") +
+    xlab("Slope size") +
+    xlab("Multiplicative trend") +
+    scale_color_discrete(
+    labels = c("Presence-absence", 
+               "Cover")
+    ) +
+    labs(color = "Data set")
+```
+
+Creating a dataset that contains only the species name and the trend estimations of both datasets. 
+```{r}
+samen = merge(LMF_output_sub,FLO_output_sub,by = "Nednaam" )[,c(1,4,10)]
+names(samen)[2] = "LMF_Multipl_trend_category_vanaf"
+names(samen)[3] = "FLO_Multipl_trend_category_vanaf"
+```
+
+Overview of how many presents datapoints each species has in both datasets. 
+```{r}
+Aantal_FLO[Aantal_FLO$Nednaam %in% samen$Nednaam,]
+Aantal_LMF[Aantal_LMF$Nednaam %in% samen$Nednaam,]
+```
+
+Removing the 5 species from this dataframe too. 
+```{r}
+for(i in 1:5){
+  samen = samen[samen$Nednaam != verschillend[i],]
+}
+```
+
+In this part, I assign each species based on the six trend classes if they get a 1, which indicates that the trend is decreasing or a 0, meaning that the trend of that species is not decreasing. 
+First, I do this for the cover data.
+```{r}
+for(i in 1:length(samen$Nednaam)){
+  if(samen$LMF_Multipl_trend_category_vanaf[i] == "Sterke toename"){
+    samen$LMF_waarde[i] = 0
+  }
+  else if(samen$LMF_Multipl_trend_category_vanaf[i] == "Matige toename"){
+    samen$LMF_waarde[i] = 0
+  }
+  else if (samen$LMF_Multipl_trend_category_vanaf[i] == "Stabiel"){
+    samen$LMF_waarde[i] = 0
+  }
+  else if (samen$LMF_Multipl_trend_category_vanaf[i] == "Onzeker"){
+    samen$LMF_waarde[i] = 0
+  }
+  else if (samen$LMF_Multipl_trend_category_vanaf[i] == "Matige afname"){
+    samen$LMF_waarde[i] = 1
+  }
+  else if (samen$LMF_Multipl_trend_category_vanaf[i] == "Sterke afname"){
+    samen$LMF_waarde[i] = 1
+  }
+}
+
+```
+
+Now I do it for the presence-absence data. 
+```{r}
+for(i in 1:length(samen$Nednaam)){
+  if(samen$FLO_Multipl_trend_category_vanaf[i] == "Sterke toename"){
+    samen$FLO_waarde[i] = 0
+  }
+  else if(samen$FLO_Multipl_trend_category_vanaf[i] == "Matige toename"){
+    samen$FLO_waarde[i] = 0
+  }
+  else if (samen$FLO_Multipl_trend_category_vanaf[i] == "Stabiel"){
+    samen$FLO_waarde[i] = 0
+  }
+  else if (samen$FLO_Multipl_trend_category_vanaf[i] == "Onzeker"){
+    samen$FLO_waarde[i] = 0
+  }
+  else if (samen$FLO_Multipl_trend_category_vanaf[i] == "Matige afname"){
+    samen$FLO_waarde[i] = 1
+  }
+  else if (samen$FLO_Multipl_trend_category_vanaf[i] == "Sterke afname"){
+    samen$FLO_waarde[i] = 1
+  }
+}
+
+```
+
+Now I simply count how many zeroes and ones are present in this dataframe for both datasets. 
+```{r}
+sum(samen$LMF_waarde==1)
+sum(samen$FLO_waarde==1)
+sum(samen$LMF_waarde==0)
+sum(samen$FLO_waarde==0)
+```
+With this information, I creata a 2x2 table with these values to perform a chi-square test if the signal detection for a decrease is different between the two datasets. 
+```{r}
+x = matrix(c(30,51,34,13), ncol=2, byrow=T, dimnames = list(c("H0","H1"),c("FLO","LMF") ))
+chisq.test(x)
+```
+We can see that there is indeed a significance difference between the two datasets. 
+
+## Weighting - Roze lijst
+In this section, I calculate the average trend estimation over all selected species on the Pink List for both the cover as presence-absence data. 
+```{r}
+slopes$weight = 1/(slopes$Multipl_trend_se_vanaf^2)
+slopes$signal = ifelse(slopes$Multipl_trend_category_vanaf == "Sterke afname" | slopes$Multipl_trend_category_vanaf == "Matige afname", 1,0)
+slopes_LMF = slopes[slopes$type == "LMF",]
+slopes_FLO = slopes[slopes$type == "FLORON",]
+```
+
+### Calculating the weighted mean
+Now I calculate the weighted mean based on the inverse variance technique that is described in my report. 
+LMF = cover
+FLO = presence-absence
+```{r}
+r_mean_LMF = sum(slopes_LMF$Multipl_trend_vanaf * slopes_LMF$weight)/sum(slopes_LMF$weight)
+
+r_mean_FLO = sum(slopes_FLO$Multipl_trend_vanaf * slopes_FLO$weight)/sum(slopes_FLO$weight)
+
+r_mean_LMF;r_mean_FLO
+```
+This are the weighted means for both datasets. 
+
+### Testing for heterogeneity with Q-statistics
+In this section, I calculated the heterogeneity of the trends to see how well if they follow the same direciton or not.
+```{r}
+Q_LMF = sum((slopes_LMF$Multipl_trend_vanaf - (r_mean_LMF))^2 * slopes_LMF$weight)
+I2_LMF = (Q_LMF-length(slopes_LMF$Nednaam)+1)/Q_LMF * 100
+
+Q_FLO = sum((slopes_FLO$Multipl_trend_vanaf - (r_mean_FLO))^2 * slopes_FLO$weight)
+I2_FLO = (Q_FLO-length(slopes_FLO$Nednaam)+1)/Q_FLO * 100
+I2_LMF;I2_FLO
+```
+From the results, the trend estimations are quite different from each other. 
+
+ 
+### The effective sample size 
+Neff: stands for effectize sample size
+```{r}
+N = length(unique(slopes$Nednaam))
+Neff_LMF = sum(slopes_LMF$weight)^2/sum(slopes_LMF$weight^2)
+Neff_FLO = sum(slopes_FLO$weight)^2/sum(slopes_FLO$weight^2)
+```
+
+Weighted Variance of the weighted mean trend. 
+```{r}
+var_LMF = sum(slopes_LMF$weight * (slopes_LMF$Multipl_trend_vanaf - r_mean_LMF)^2)/sum(slopes_LMF$weight) * Neff_LMF/(Neff_LMF-1)
+
+var_FLO = sum(slopes_FLO$weight * (slopes_FLO$Multipl_trend_vanaf - r_mean_FLO)^2)/sum(slopes_FLO$weight) * Neff_FLO/(Neff_FLO-1)
+
+```
+
+Weighted standard error
+```{r}
+wSE_LMF = sqrt(var_LMF/Neff_LMF)
+wSE_FLO = sqrt(var_FLO/Neff_FLO)
+wSE_LMF;wSE_FLO
+```
+The confidence interval of the weighted mean. 
+```{r}
+r_mean_LMF - 1.96*wSE_LMF; r_mean_LMF + 1.96*wSE_LMF
+r_mean_FLO - 1.96*wSE_FLO; r_mean_FLO + 1.96*wSE_FLO
+```
+### T-test
+Because there is unequal variance between the two datasets, I calculated the degrees of freedom that incorporates this. 
+```{r}
+df = (var_LMF/Neff_LMF + var_FLO/Neff_FLO)^2/(((var_LMF/Neff_LMF)^2/(Neff_LMF-1)) + ((var_FLO/Neff_FLO)^2/(Neff_FLO-1)))
+```
+
+Two sample t-test
+```{r}
+t_score = (r_mean_FLO-r_mean_LMF)/(sqrt(var_LMF/Neff_LMF + var_FLO/Neff_FLO))
+t_score
+pt(t_score,df,lower.tail = F)
+```
+The test showed that the two weighted mean trends are significantly different from each other. 
+
+# Non-native species
+In this section, I looked at the detection of increase in population trends based on both datasets. For this, I used non-native species with the idea that they have a higher increase rate in population size compared to native species. 
+The first step is to read the data with characteristics and select the non-native species. 
+```{r}
+kenmerken = read_delim("LMF_Kenmerken_planten.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+kenmerken_sub = kenmerken[,c(3,6,60)]
+selectie = kenmerken_sub[kenmerken_sub$Status == "u" & kenmerken_sub$B_aantalRecords>25,]
+invasief = na.omit(selectie) #Selection of non-native species 
+```
+
+From this step on, all the analysis are the same as with the Pink Species described above. I will mention briefly what the purpose was of each code chunk, but the idea is the same.
+
+First, I select all the non-native species that are present in both two datasets. 
+```{r}
+LMF_invasief = LMF_output[LMF_output$Nednaam %in% invasief$Nednaam,][,c(5,12,13,14,15,25,34)]
+LMF_invasief = na.omit(LMF_invasief)
+#Hier selecteer op cover, op een omslachtige manier
+LMF_invasief = LMF_invasief[seq(1,length(LMF_invasief$Nednaam)-1,3),]
+LMF_invasief = na.omit(LMF_invasief)
+
+#Selectie op psi
+LMF_invasief_psi = LMF_output[LMF_output$Nednaam %in% invasief$Nednaam,][,c(5,12,13,14,15,18,25,34)]
+LMF_invasief_psi = na.omit(LMF_invasief_psi)
+LMF_invasief_psi = LMF_invasief_psi[LMF_invasief_psi$Recordtype_naam == "psi",]
+LMF_invasief_psi$Multipl_trend_vanaf = as.numeric(gsub(",", ".", LMF_invasief_psi$Multipl_trend_vanaf))
+LMF_invasief_psi$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", LMF_invasief_psi$Multipl_trend_se_vanaf))
+
+#de komma naar punt veranderen en daarna omzetten naar numeric
+LMF_invasief$Multipl_trend_vanaf = as.numeric(gsub(",", ".", LMF_invasief$Multipl_trend_vanaf))
+LMF_invasief$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", LMF_invasief$Multipl_trend_se_vanaf)) 
+
+# Selectie voor de presence-absence dataset
+FLO_invasief = FLO_output[FLO_output$Nednaam %in% invasief$Nednaam,][,c(5,8,13:15,31)]
+FLO_invasief = na.omit(FLO_invasief)
+FLO_invasief = FLO_invasief[FLO_invasief$Stratum_omschrijving == "Nederland",]
+FLO_invasief$Multipl_trend_vanaf = as.numeric(gsub(",", ".", FLO_invasief$Multipl_trend_vanaf)) 
+FLO_invasief$Multipl_trend_se_vanaf = as.numeric(gsub(",", ".", FLO_invasief$Multipl_trend_se_vanaf)) 
+
+
+soorten_toename = intersect(LMF_invasief$Nednaam, FLO_invasief$Nednaam)
+```
+
+A total of 15 species are selected based on the criteria. 
+
+I remove again the water plant species: smalle waterpest, Knopkroos and Dwergkroos. This result in 12 species that can be used for the analysis. 
+```{r}
+soorten_toename = soorten_toename[-c(1,13,15)]
+```
+
+
+Selecting the datasets for only these 12 species. 
+```{r}
+LMF_invasief = LMF_invasief[LMF_invasief$Nednaam %in% soorten_toename,]
+FLO_invasief = FLO_invasief[FLO_invasief$Nednaam %in% soorten_toename,]
+LMF_invasief_psi = LMF_invasief_psi[LMF_invasief_psi$Nednaam %in% soorten_toename,]
+```
+
+
+```{r}
+# Cover data with total mean cover
+invasief_samen = merge(LMF_invasief,FLO_invasief,by = "Nednaam" )[,c(1,5,11)]
+names(invasief_samen)[2] = "LMF_Multipl_trend_category_vanaf"
+names(invasief_samen)[3] = "FLO_Multipl_trend_category_vanaf"
+
+
+# Cover data with psi
+invasief_psi_samen = merge(LMF_invasief_psi,FLO_invasief,by = "Nednaam" )[,c(1,5,12)]
+names(invasief_psi_samen)[2] = "LMF_Multipl_trend_category_vanaf"
+names(invasief_psi_samen)[3] = "FLO_Multipl_trend_category_vanaf"
+```
+
+
+Here I create dataframes of the trend estimations with standard errors for the twelve species based on the two datasets (LMF and FLORON). 
+```{r}
+#Hier voor cover
+LMF_invasief_slope = LMF_invasief[,c(1,3,4,5)]
+LMF_invasief_slope$type = "LMF"
+FLO_invasief_slope = FLO_invasief[,c(1,3,4,5)]
+FLO_invasief_slope$type = "FLORON"
+slopes_invasief = rbind(LMF_invasief_slope,FLO_invasief_slope)
+
+
+
+#Hier voor psi
+LMF_invasief_psi_slope = LMF_invasief_psi[,c(1,3,4,5)]
+LMF_invasief_psi_slope$type = "LMF"
+slopes_psi_invasief = rbind(LMF_invasief_slope,FLO_invasief_slope)
+```
+
+## Distribution allignment with the two datasets.
+Also with the non-native species I test if the distribution based on the presence-absence data of the species are similar or not. Again, I look if the direction of the trend are the same and if there is overlap with the confidence intervals. 
+
+The visualisation.
+```{r}
+pd = position_dodge(.2)    ### How much to jitter the points on the plot
+
+ggplot(slopes_psi_invasief,                ### The data frame to use.
+       aes(y    =  Nednaam,
+            x    =  Multipl_trend_vanaf,
+          color = type)) +
+
+    geom_point(shape = 20,
+               size  = 3,
+             position = pd) +
+
+    geom_errorbar(aes(xmin = Multipl_trend_vanaf - 1.96*Multipl_trend_se_vanaf,
+                      xmax = Multipl_trend_vanaf + 1.96*Multipl_trend_se_vanaf),
+                      width = 0.2,
+                      size  = 0.7,
+                      position = pd) +
+    geom_vline(xintercept=1) +
+    theme_bw() +
+    theme(axis.title = element_text(face = "bold")) +
+
+    ylab("Species Name") +
+    xlab("Multiplicative trend") +
+    scale_color_discrete(
+    labels = c("Presence-absent distribution", 
+               "Cover distribution")
+    ) +
+    labs(color = "Data set")
+```
+The numeric values.
+```{r}
+slopes_psi_invasief$low_bound = slopes_psi_invasief$Multipl_trend_vanaf - slopes_psi_invasief$Multipl_trend_se_vanaf * 1.96
+slopes_psi_invasief$up_bound = slopes_psi_invasief$Multipl_trend_vanaf + slopes_psi_invasief$Multipl_trend_se_vanaf * 1.96
+
+
+for(i in 1:12){
+  if(slopes_psi_invasief[slopes_psi_invasief$type == "FLORON",]$low_bound[i] >= slopes_psi_invasief[slopes_psi_invasief$type == "LMF",]$low_bound[i] & slopes_psi_invasief[slopes_psi_invasief$type == "FLORON",]$low_bound[i] <= slopes_psi_invasief[slopes_psi_invasief$type == "LMF",]$up_bound[i]) {
+    slopes_psi_invasief$zelfde_richting[i] = 1
+  }
+else if(slopes_psi_invasief[slopes_psi_invasief$type == "FLORON",]$up_bound[i] >= slopes_psi_invasief[slopes_psi_invasief$type == "LMF",]$low_bound[i] & slopes_psi_invasief[slopes_psi_invasief$type == "FLORON",]$up_bound[i] <= slopes_psi_invasief[slopes_psi_invasief$type == "LMF",]$up_bound[i]){
+    slopes_psi_invasief$zelfde_richting[i] = 1
+}
+  else{
+    slopes_psi_invasief$zelfde_richting[i] = 0
+  }
+}
+
+naam = slopes_psi_invasief[slopes_psi_invasief$zelfde_richting ==0,]$Nednaam
+
+for(i in 1:12){
+  if(slopes_psi_invasief[slopes_psi_invasief$type == "LMF",]$zelfde_richting[i] == 0){
+    if(slopes_psi_invasief[slopes_psi_invasief$type == "FLORON",]$Multipl_trend_vanaf[i] < 1 & slopes_psi_invasief[slopes_psi_invasief$type == "LMF",]$Multipl_trend_vanaf[i] <1){
+      slopes_psi_invasief$zelfde_richting[i] = 1
+    }
+    else if(slopes_psi_invasief[slopes_psi_invasief$type == "FLORON",]$Multipl_trend_vanaf[i] > 1 & slopes_psi_invasief[slopes_psi_invasief$type == "LMF",]$Multipl_trend_vanaf[i] >1){
+      slopes_psi_invasief$zelfde_richting[i] = 1
+    }
+    else{
+      slopes_psi_invasief$zelfde_richting[i] = 0
+    }
+  }
+}
+slopes_psi_invasief$zelfde_richting[1:12]
+```
+
+All non-native species showed an agreement when looking at the dispersal distribution of these species for both occupancy and cover data. The comparison between cover abundance and presence-absent can there for be made for these twelve species. 
+
+
+## Signal detection of increase populatin trend
+The same process as with the Pink species. First, I converted the two increasing classes to 1s and the other classes to 0s.
+Cover data
+```{r}
+for(i in 1:length(invasief_samen$Nednaam)){
+  if(invasief_samen$LMF_Multipl_trend_category_vanaf[i] == "Sterke toename"){
+    invasief_samen$LMF_waarde[i] = 1
+  }
+  else if(invasief_samen$LMF_Multipl_trend_category_vanaf[i] == "Matige toename"){
+    invasief_samen$LMF_waarde[i] = 1
+  }
+  else if (invasief_samen$LMF_Multipl_trend_category_vanaf[i] == "Stabiel"){
+    invasief_samen$LMF_waarde[i] = 0
+  }
+  else if (invasief_samen$LMF_Multipl_trend_category_vanaf[i] == "Onzeker"){
+    invasief_samen$LMF_waarde[i] = 0
+  }
+  else if (invasief_samen$LMF_Multipl_trend_category_vanaf[i] == "Matige afname"){
+    invasief_samen$LMF_waarde[i] = 0
+  }
+  else if (invasief_samen$LMF_Multipl_trend_category_vanaf[i] == "Sterke afname"){
+    invasief_samen$LMF_waarde[i] = 0
+  }
+}
+
+```
+
+Presence-absence data
+```{r}
+for(i in 1:length(invasief_samen$Nednaam)){
+  if(invasief_samen$FLO_Multipl_trend_category_vanaf[i] == "Sterke toename"){
+    invasief_samen$FLO_waarde[i] = 1
+  }
+  else if(invasief_samen$FLO_Multipl_trend_category_vanaf[i] == "Matige toename"){
+    invasief_samen$FLO_waarde[i] = 1
+  }
+  else if (invasief_samen$FLO_Multipl_trend_category_vanaf[i] == "Stabiel"){
+    invasief_samen$FLO_waarde[i] = 0
+  }
+  else if (invasief_samen$FLO_Multipl_trend_category_vanaf[i] == "Onzeker"){
+    invasief_samen$FLO_waarde[i] = 0
+  }
+  else if (invasief_samen$FLO_Multipl_trend_category_vanaf[i] == "Matige afname"){
+    invasief_samen$FLO_waarde[i] = 0
+  }
+  else if (invasief_samen$FLO_Multipl_trend_category_vanaf[i] == "Sterke afname"){
+    invasief_samen$FLO_waarde[i] = 0
+  }
+}
+
+```
+
+Calculating how much of each group is present in both datasets. 
+```{r}
+sum(invasief_samen$LMF_waarde)
+sum(invasief_samen$FLO_waarde)
+sum(invasief_samen$LMF_waarde==0)
+sum(invasief_samen$FLO_waarde==0)
+```
+These are converted in a 2x2 table and a chi-square test is performed to see if there is any significance difference. 
+```{r}
+y = matrix(c(5,7,7,5),ncol=2, byrow = T, dimnames = list(c("H0","H1"),c("FLO","LMF") ))
+
+chisq.test(y)
+```
+No significant difference was found.  
+
+Visualization of all the trend estimation with SE for both the presence-absence and cover data (total mean cover that is). 
+```{r}
+pd = position_dodge(.2)    ### How much to jitter the points on the plot
+
+ggplot(slopes_invasief,                ### The data frame to use.
+       aes(y    =  Nednaam,
+            x    =  Multipl_trend_vanaf,
+          color = type)) +
+
+    geom_point(shape = 20,
+               size  = 3,
+             position = pd) +
+
+    geom_errorbar(aes(xmin = Multipl_trend_vanaf - 1.96*Multipl_trend_se_vanaf,
+                      xmax = Multipl_trend_vanaf + 1.96*Multipl_trend_se_vanaf),
+                      width = 0.2,
+                      size  = 0.7,
+                      position = pd) +
+    geom_vline(xintercept=1) +
+    theme_bw() +
+    theme(axis.title = element_text(face = "bold")) +
+
+    ylab("Species Name") +
+    xlab("Multiplicative trend") +
+    scale_color_discrete(
+    labels = c("Presence-absence", 
+               "Cover")
+    ) +
+    labs(color = "Data set")
+```
+
+## Weighting - Non-native species
+The same steps are performed to calculate the weighted mean of all twelve species for both datasets. 
+```{r}
+slopes_invasief$weight = 1/(slopes_invasief$Multipl_trend_se_vanaf^2)
+slopes_invasief$signal = ifelse(slopes_invasief$Multipl_trend_category_vanaf == "Sterke toename" | slopes_invasief$Multipl_trend_category_vanaf == "Matige toename", 1,0)
+
+slopes_LMF = slopes_invasief[slopes_invasief$type == "LMF",]
+slopes_FLO = slopes_invasief[slopes_invasief$type == "FLORON",]
+```
+
+LMF = cover
+FLO = presence-absence
+```{r}
+w_mean_LMF = sum(slopes_LMF$Multipl_trend_vanaf * slopes_LMF$weight)/sum(slopes_LMF$weight)
+
+w_mean_FLO = sum(slopes_FLO$Multipl_trend_vanaf * slopes_FLO$weight)/sum(slopes_FLO$weight)
+
+w_mean_LMF;w_mean_FLO
+```
+
+### Testing for heterogeneity with Q-statistics
+In this section, I calculated the heterogeneity of the trends to see how well if they follow the same direciton or not.
+```{r}
+Q_LMF_invasief = sum((slopes_LMF$Multipl_trend_vanaf - (w_mean_LMF))^2 * slopes_LMF$weight)
+I2_LMF_invasief = (Q_LMF_invasief-length(slopes_LMF$Nednaam)+1)/Q_LMF_invasief * 100
+
+Q_FLO_invasief = sum((slopes_FLO$Multipl_trend_vanaf - (w_mean_FLO))^2 * slopes_FLO$weight)
+I2_FLO_invasief = (Q_FLO_invasief-length(slopes_FLO$Nednaam)+1)/Q_FLO_invasief * 100
+I2_LMF_invasief;I2_FLO_invasief
+```
+Both of them have a lot of discrepancy between the species. 
+
+### The effective sample size 
+Neff: stands for effectize sample size
+```{r}
+N = length(unique(slopes_invasief$Nednaam))
+Neff_LMF = sum(slopes_LMF$weight)^2/sum(slopes_LMF$weight^2)
+Neff_FLO = sum(slopes_FLO$weight)^2/sum(slopes_FLO$weight^2)
+```
+
+Weighted Variance
+```{r}
+var_LMF = sum(slopes_LMF$weight * (slopes_LMF$Multipl_trend_vanaf - w_mean_LMF)^2)/sum(slopes_LMF$weight) * Neff_LMF/(Neff_LMF-1)
+
+var_FLO = sum(slopes_FLO$weight * (slopes_FLO$Multipl_trend_vanaf - w_mean_FLO)^2)/sum(slopes_FLO$weight) * Neff_FLO/(Neff_FLO-1)
+
+```
+
+Weighted standard error
+```{r}
+wSE_LMF = sqrt(var_LMF/Neff_LMF)
+wSE_FLO = sqrt(var_FLO/Neff_FLO)
+wSE_LMF;wSE_FLO
+```
+Calculating the confidence intervals
+```{r}
+w_mean_LMF - 1.96*wSE_LMF; w_mean_LMF + 1.96*wSE_LMF
+w_mean_FLO - 1.96*wSE_FLO; w_mean_FLO + 1.96*wSE_FLO
+```
+
+unequal variance: how to get degrees of freedom
+```{r}
+df = (var_LMF/Neff_LMF + var_FLO/Neff_FLO)^2/(((var_LMF/Neff_LMF)^2/(Neff_LMF-1)) + ((var_FLO/Neff_FLO)^2/(Neff_FLO-1)))
+df
+```
+
+two sample t-test
+```{r}
+t_score = (w_mean_LMF - w_mean_FLO)/(sqrt(var_LMF/Neff_LMF + var_FLO/Neff_FLO))
+t_score
+pt(t_score,df,lower.tail = F)
+
+```
+
+# Research project 3
+The below code is used to check if the population trend of a species for both datasets are pointing in the same direction or in opposite direction. This is checked for both the total mean cover and probability of detection of the cover data. This is done for all 620 species.
+The things that I looked at if if the confidence intervals had overlap with each other or if the direction (increase, decrease, stable) were the same for both datasets. 
+
+## Cheking if the trends of the two datasets are in agreement with distribution
+First we check for the spread of the plant species that they distribution is in line with the two datasets. 
+
+```{r}
+FLO_verspreiding$dataset = "FLORON"
+LMF_verspreiding$dataset = "LMF"
+
+verspreiding_all = rbind(LMF_verspreiding, FLO_verspreiding[,-3])
+
+```
+
+```{r}
+verspreiding_all$low_bound = verspreiding_all$Multipl_trend_vanaf - verspreiding_all$Multipl_trend_se_vanaf * 1.96
+verspreiding_all$up_bound = verspreiding_all$Multipl_trend_vanaf + verspreiding_all$Multipl_trend_se_vanaf * 1.96
+
+
+for(i in 1:620){
+  if(verspreiding_all[verspreiding_all$dataset == "FLORON",]$low_bound[i] >= verspreiding_all[verspreiding_all$dataset == "LMF",]$low_bound[i] & verspreiding_all[verspreiding_all$dataset == "FLORON",]$low_bound[i] <= verspreiding_all[verspreiding_all$dataset == "LMF",]$up_bound[i]) {
+    verspreiding_all$zelfde_richting[i] = 1
+  }
+else if(verspreiding_all[verspreiding_all$dataset == "FLORON",]$up_bound[i] >= verspreiding_all[verspreiding_all$dataset == "LMF",]$low_bound[i] & verspreiding_all[verspreiding_all$dataset == "FLORON",]$up_bound[i] <= verspreiding_all[verspreiding_all$dataset == "LMF",]$up_bound[i]){
+    verspreiding_all$zelfde_richting[i] = 1
+}
+  else{
+    verspreiding_all$zelfde_richting[i] = 0
+  }
+}
+
+#The same code, but now 
+naam = verspreiding_all[verspreiding_all$zelfde_richting ==0,]$Nednaam
+for(i in 1:620){
+  if(verspreiding_all[verspreiding_all$dataset == "LMF",]$zelfde_richting[i] == 0){
+    if(verspreiding_all[verspreiding_all$dataset == "FLORON",]$Multipl_trend_vanaf[i] < 1 & verspreiding_all[verspreiding_all$dataset == "LMF",]$Multipl_trend_vanaf[i] <1){
+      verspreiding_all$zelfde_richting[i] = 1
+    }
+    else if(verspreiding_all[verspreiding_all$dataset == "FLORON",]$Multipl_trend_vanaf[i] > 1 & verspreiding_all[verspreiding_all$dataset == "LMF",]$Multipl_trend_vanaf[i] >1){
+      verspreiding_all$zelfde_richting[i] = 1
+    }
+    else{
+      verspreiding_all$zelfde_richting[i] = 0
+    }
+  }
+}
+
+```
+
+The species name can be changed to see if both datasets have the same alignment when it comes to distribution of the trends. If the final column "zelfde_richting" is a 1, then the data is in agreement. If it is a 0, then is in disagreement. 
+```{r}
+verspreiding_all[verspreiding_all$Nednaam == "Bergbasterdwederik",]$zelfde_richting[1]
+```
+
+
+## Checking agreement with cover and spread
+Now we check if the presence-absent and cover abundance data are also in agreement with each other. The same process was applied, only this time the cover recordtype was used rather than the psi. 
+```{r}
+LMF_cover$dataset = "LMF"
+cover_all = rbind(LMF_cover, FLO_verspreiding[,-3])
+```
+
+```{r}
+cover_all$low_bound = cover_all$Multipl_trend_vanaf - cover_all$Multipl_trend_se_vanaf * 1.96
+cover_all$up_bound = cover_all$Multipl_trend_vanaf + cover_all$Multipl_trend_se_vanaf * 1.96
+
+
+for(i in 1:620){
+  if(cover_all[cover_all$dataset == "FLORON",]$low_bound[i] >= cover_all[cover_all$dataset == "LMF",]$low_bound[i] & cover_all[cover_all$dataset == "FLORON",]$low_bound[i] <= cover_all[cover_all$dataset == "LMF",]$up_bound[i]) {
+    cover_all$zelfde_richting[i] = 1
+  }
+else if(cover_all[cover_all$dataset == "FLORON",]$up_bound[i] >= cover_all[cover_all$dataset == "LMF",]$low_bound[i] & cover_all[cover_all$dataset == "FLORON",]$up_bound[i] <= cover_all[cover_all$dataset == "LMF",]$up_bound[i]){
+    cover_all$zelfde_richting[i] = 1
+}
+  else{
+    cover_all$zelfde_richting[i] = 0
+  }
+}
+
+naam = cover_all[cover_all$zelfde_richting ==0,]$Nednaam
+
+
+for(i in 1:620){
+  if(cover_all[cover_all$dataset == "LMF",]$zelfde_richting[i] == 0){
+    if(cover_all[cover_all$dataset == "FLORON",]$Multipl_trend_vanaf[i] < 1 & cover_all[cover_all$dataset == "LMF",]$Multipl_trend_vanaf[i] <1){
+      cover_all$zelfde_richting[i] = 1
+    }
+    else if(cover_all[cover_all$dataset == "FLORON",]$Multipl_trend_vanaf[i] > 1 & cover_all[cover_all$dataset == "LMF",]$Multipl_trend_vanaf[i] >1){
+      cover_all$zelfde_richting[i] = 1
+    }
+    else{
+      cover_all$zelfde_richting[i] = 0
+    }
+  }
+}
+
+```
+
+The same idea is applied. 
+```{r}
+cover_all[cover_all$Nednaam == "Goudzuring",]$zelfde_richting[1]
+```
+If both values are 1 for zelfde_richting, then it means the datasets show similar population trends. 
+
+
+## Selecting for species with different trend directions with both datasets
+With this last line of code, I checked which species had a disagreement in population trend with the two datasets.
+```{r}
+verspreiding_all[verspreiding_all$zelfde_richting ==0 & verspreiding_all$dataset == "LMF",]
+```
+
+From this list, I picked four species to be tested in Project 3 with the shared model and see what the effect is when you combine two datasets together with a different direction in population rate. 
+
+
