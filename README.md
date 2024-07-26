@@ -14,6 +14,9 @@ This code is used to calculate the population trend based on cover and presence-
 # **Project_1**
 This code is related to the first research part. In this code, I compare the population trend estimations with standard errors of the two datasets/models. One is based on cover data on a small scale, while the other is presence-absence data on a coarse scale. The main idea of interest was to find if one of the two datasets can detected signals if a species population trend is going to decrease/increase. 
 
-#**Project_2**
-This code is related to research part 2. This code analyses the model performace of the logistic regression model with Bayesian statistics with presence-absence data. Two datasets are used. The first one is the original presence-absence dataset and the second one is the updated version of the presence-absence dataset. 
+# **Project_2**
+This code is related to research part 2. This code analyses the model performace of the logistic regression model with Bayesian statistics with presence-absence data. Two datasets are used. The first one is the original presence-absence dataset and the second one is the updated version of the presence-absence dataset. The question was if the model performace of the logistic regression increased with added data of the presence-absence dataset.
+
+# **Project_3**
+In the third project, I created an integraded model, called the shared model. This shared model can included both the cover as the presence-absence data in one model. The idea with an integraded model is that more data can be added, which can result in more precize parameter estimations. 
 
